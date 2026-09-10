@@ -26,6 +26,8 @@ import string
 import subprocess
 import sys
 import threading
+import urllib.request
+from urllib.parse import urlparse
 
 try:
     import websockets
@@ -99,6 +101,79 @@ def lyric_index(lyrics, t_ms: float):
         else:
             hi = mid
     return lo - 1
+
+
+# --------------------------------------------------------------------------- #
+# 下载工具（保存当前歌曲 / 歌词）
+# --------------------------------------------------------------------------- #
+class DownloadCancelled(Exception):
+    pass
+
+
+_INVALID_FILENAME = re.compile(r'[\\/:*?"<>|\r\n\t]+')
+
+
+def sanitize_filename(name, fallback="song"):
+    """把歌曲名/歌手清洗成合法的 Windows 文件名（不含扩展名）。"""
+    text = _INVALID_FILENAME.sub("_", str(name or "")).strip(" .")
+    text = re.sub(r"\s+", " ", text)
+    return text[:120] or fallback
+
+
+_AUDIO_EXTS = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".wma"}
+
+
+def guess_audio_ext(url, source=""):
+    """从下载地址推断音频扩展名，失败则按音源/默认给 .mp3。"""
+    try:
+        ext = os.path.splitext(urlparse(url).path)[1].lower()
+    except Exception:
+        ext = ""
+    if ext in _AUDIO_EXTS:
+        return ext
+    return {"qq": ".m4a", "mg": ".mp3"}.get(source or "", ".mp3")
+
+
+def download_file(url, dest, progress=None, timeout=30, chunk_size=64 * 1024,
+                  stop_event=None, user_agent="Mozilla/5.0"):
+    """流式下载 url 到 dest。
+
+    progress(done_bytes, total_bytes) 会周期性回调（total 未知时为 0）；
+    stop_event 为 threading.Event，置位后抛出 DownloadCancelled。
+    返回 (已下载字节数, 总字节数)。
+    """
+    req = urllib.request.Request(url, headers={"User-Agent": user_agent})
+    done = 0
+    tmp = dest + ".part"
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            try:
+                total = int(resp.headers.get("Content-Length") or 0)
+            except Exception:
+                total = 0
+            with open(tmp, "wb") as fh:
+                while True:
+                    if stop_event is not None and stop_event.is_set():
+                        raise DownloadCancelled("用户取消下载")
+                    buf = resp.read(chunk_size)
+                    if not buf:
+                        break
+                    fh.write(buf)
+                    done += len(buf)
+                    if progress is not None:
+                        try:
+                            progress(done, total)
+                        except Exception:
+                            pass
+        os.replace(tmp, dest)
+        return done, total
+    except BaseException:
+        try:
+            if os.path.isfile(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+        raise
 
 
 # --------------------------------------------------------------------------- #

@@ -69,8 +69,10 @@ def _fatal_error(msg: str) -> None:
 try:
     import websockets  # noqa: F401
     from jusic_core import (DEFAULT_HOST, MUSIC_API, UI_URL,
-                            RoomClient, MpvEngine, human_seconds,
-                            lyric_index, parse_lyrics, sort_rooms)
+                            RoomClient, MpvEngine, DownloadCancelled,
+                            download_file, guess_audio_ext, human_seconds,
+                            lyric_index, parse_lyrics, sanitize_filename,
+                            sort_rooms)
 except (ImportError, SystemExit) as exc:
     _fatal_error("缺少运行依赖，请先执行：\n\n"
                  "    python -m pip install -r requirements.txt\n\n"
@@ -90,6 +92,8 @@ class JusicGui:
         self._lyric_t0 = 0.0         # 本曲本地起播时刻（time.monotonic）
         self._lyric_idx = -1
         self._lyric_after = None
+        self._current_music = None   # 最近一次 MUSIC（用于下载）
+        self._downloading = False    # 是否有下载任务进行中
 
         # 跨线程事件桥
         self.evq = queue.Queue()
@@ -107,7 +111,8 @@ class JusicGui:
     # ===================================================================== #
     def _build_ui(self):
         root = self.root
-        root.title("Jusic 房间播放器（低内存 · mpv 内核）")
+        self._version = self._app_version()
+        root.title(f"Jusic 房间播放器 v{self._version}（低内存 · mpv 内核）")
         root.geometry("1000x640")
         root.minsize(860, 520)
 
@@ -206,6 +211,13 @@ class JusicGui:
         self.vol_var.trace_add("write", lambda *_: self.vol_label.config(text=f"{int(self.vol_var.get())}%"))
         ttk.Button(vol_row, text="选mpv…", width=8,
                    command=self._pick_mpv).grid(row=0, column=3, padx=(6, 0))
+        dl_btn = ttk.Menubutton(vol_row, text="下载▾", width=8)
+        dl_menu = tk.Menu(dl_btn, tearoff=0)
+        dl_menu.add_command(label="下载当前歌曲（音频）", command=self._download_song)
+        dl_menu.add_command(label="下载当前歌词（.lrc）", command=self._download_lyrics)
+        dl_menu.add_command(label="下载歌曲 + 歌词（一起）", command=self._download_both)
+        dl_btn["menu"] = dl_menu
+        dl_btn.grid(row=0, column=4, padx=(6, 0))
 
         # 歌词（LRC，随播放时间同步高亮当前句）
         lyrf = ttk.Labelframe(right, text="歌词", padding=4)
@@ -272,8 +284,8 @@ class JusicGui:
         ttk.Label(status, textvariable=self.status_var, foreground="#555").pack(side="left")
         self.mpv_var = tk.StringVar(value="mpv: …")
         ttk.Label(status, textvariable=self.mpv_var, foreground="#888").pack(side="right")
-        # 角落：开源协议与致谢入口（点击查看详情）
-        about_label = tk.Label(status, text="ℹ 关于 · GPL-3.0",
+        # 角落：版本号 + 开源协议与致谢入口（点击查看详情）
+        about_label = tk.Label(status, text=f"ℹ 关于 · v{self._version} · GPL-3.0",
                                fg="#0a66c2", cursor="hand2",
                                font=(FONT, 8), bg=self.root.cget("bg"))
         about_label.pack(side="right", padx=(8, 2))
@@ -417,6 +429,112 @@ class JusicGui:
         except Exception:
             pass
 
+    # ---------------- 下载当前歌曲 / 歌词 ---------------- #
+    def _song_title(self):
+        m = self._current_music or {}
+        return sanitize_filename(
+            f"{m.get('name') or 'song'} - {m.get('artist') or ''}".strip(" -")) or "song"
+
+    def _download_song(self):
+        m = self._current_music
+        if not m:
+            self._log("当前没有正在播放的歌曲，无法下载", "warn")
+            return
+        url = m.get("url") or ""
+        if not url:
+            self._log("当前歌曲没有可用的下载地址", "warn")
+            return
+        if self._downloading:
+            self._log("已有下载任务进行中，请稍候…", "warn")
+            return
+        ext = guess_audio_ext(url, m.get("source"))
+        path = filedialog.asksaveasfilename(
+            parent=self.root, title="保存当前歌曲",
+            initialfile=self._song_title() + ext, defaultextension=ext,
+            filetypes=[("音频文件", "*" + ext), ("所有文件", "*.*")])
+        if not path:
+            return
+        self._downloading = True
+        self._log(f"开始下载：{os.path.basename(path)}", "muted")
+        threading.Thread(target=self._download_worker, args=(url, path, "歌曲"),
+                         daemon=True, name="jusic-download").start()
+
+    def _download_lyrics(self):
+        m = self._current_music or {}
+        lyric = (m.get("lyric") or "").strip()
+        if not lyric:
+            self._log("当前歌曲暂无歌词可下载", "warn")
+            return
+        path = filedialog.asksaveasfilename(
+            parent=self.root, title="保存当前歌词",
+            initialfile=self._song_title() + ".lrc", defaultextension=".lrc",
+            filetypes=[("LRC 歌词", "*.lrc"), ("文本文件", "*.txt"), ("所有文件", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(lyric + "\n")
+            self._log(f"歌词已保存：{os.path.basename(path)}", "good")
+        except Exception as exc:
+            self._log(f"歌词保存失败：{exc}", "warn")
+
+    def _download_both(self):
+        """音频与歌词一起下载：音频存到用户选择的位置，歌词存为同名 .lrc。"""
+        m = self._current_music
+        if not m:
+            self._log("当前没有正在播放的歌曲，无法下载", "warn")
+            return
+        url = m.get("url") or ""
+        if not url:
+            self._log("当前歌曲没有可用的下载地址", "warn")
+            return
+        if self._downloading:
+            self._log("已有下载任务进行中，请稍候…", "warn")
+            return
+        ext = guess_audio_ext(url, m.get("source"))
+        path = filedialog.asksaveasfilename(
+            parent=self.root, title="保存歌曲（歌词将保存为同名 .lrc）",
+            initialfile=self._song_title() + ext, defaultextension=ext,
+            filetypes=[("音频文件", "*" + ext), ("所有文件", "*.*")])
+        if not path:
+            return
+        lyric = (m.get("lyric") or "").strip()
+        lyrics = ((os.path.splitext(path)[0] + ".lrc"), lyric) if lyric else None
+        self._downloading = True
+        note = "歌曲 + 歌词" if lyrics else "歌曲（当前无歌词）"
+        self._log(f"开始下载：{os.path.basename(path)}（{note}）", "muted")
+        threading.Thread(target=self._download_worker, args=(url, path, "歌曲+歌词", lyrics),
+                         daemon=True, name="jusic-download").start()
+
+    def _download_worker(self, url, path, kind, lyrics=None):
+        """lyrics 为 (lrc_path, text) 时，音频下载完成后一并写出歌词。"""
+        last = [0.0]
+
+        def prog(done, total):
+            now = time.monotonic()
+            if now - last[0] >= 0.5 or (total and done >= total):
+                last[0] = now
+                self.evq.put(("dl-progress", (done, total)))
+
+        try:
+            done, _total = download_file(url, path, progress=prog)
+            lrc_saved = None
+            if lyrics and lyrics[0] and lyrics[1]:
+                lrc_path, text = lyrics
+                try:
+                    with open(lrc_path, "w", encoding="utf-8", newline="\n") as fh:
+                        fh.write(text if text.endswith("\n") else text + "\n")
+                    lrc_saved = lrc_path
+                except Exception as exc:
+                    self.evq.put(("dl-error", f"歌词保存失败：{exc}"))
+            self.evq.put(("dl-done", (path, done, lrc_saved)))
+        except DownloadCancelled:
+            self.evq.put(("dl-error", "下载已取消"))
+        except Exception as exc:
+            self.evq.put(("dl-error", f"{type(exc).__name__}: {exc}"))
+        finally:
+            self._downloading = False
+
     # ---------------- mpv 内核 ---------------- #
     def _update_mpv_status(self):
         path = MpvEngine.find_mpv(self.client.engine.mpv_path)
@@ -453,7 +571,7 @@ class JusicGui:
             return "1.0.0"
 
     def _show_about(self):
-        ver = self._app_version()
+        ver = getattr(self, "_version", None) or self._app_version()
         lines = [
             "JusicRoomPlayer " + ver + "（一起听歌吧 · 轻量房间客户端）",
             "",
@@ -542,6 +660,7 @@ class JusicGui:
             self.status_var.set(f"后端 https://{self.args.host}{MUSIC_API} ｜ 重连中（{data}）")
         elif event == "music":
             m = data or {}
+            self._current_music = m
             title = m.get("name") or "—"
             artist = m.get("artist") or ""
             dur = human_seconds(m.get("duration"))
@@ -565,6 +684,24 @@ class JusicGui:
             self._log(f"[通知] {data}", "warn")
         elif event == "announce":
             self._log(f"[公告] {(data or {}).get('content', '')[:240]}", "warn")
+        elif event == "dl-progress":
+            done, total = data
+            if total:
+                self.status_var.set(
+                    f"下载中… {done / 1048576:.1f}/{total / 1048576:.1f} MB"
+                    f"（{done * 100 // total}%）")
+            else:
+                self.status_var.set(f"下载中… {done / 1048576:.1f} MB")
+        elif event == "dl-done":
+            path, done, lrc = data
+            msg = f"下载完成：{os.path.basename(path)}（{done / 1048576:.1f} MB）"
+            if lrc:
+                msg += f" + 歌词 {os.path.basename(lrc)}"
+            self._log(msg, "good")
+            self.status_var.set(msg)
+        elif event == "dl-error":
+            self._log(f"[下载失败] {data}", "warn")
+            self.status_var.set(f"下载失败：{data}")
         elif event == "log":
             self._log(data, "muted")
         elif event == "error":
