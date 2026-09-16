@@ -198,6 +198,11 @@ class JusicGui:
         self.online_var = tk.StringVar(value="—")
         ttk.Label(info, textvariable=self.room_var, foreground="#0a6").grid(row=2, column=0, sticky="w", pady=(4, 0))
         ttk.Label(info, textvariable=self.online_var, foreground="#06a").grid(row=2, column=1, sticky="e", pady=(4, 0))
+        ttk.Button(info, text="切歌（投票）", command=self._skip_vote).grid(
+            row=3, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(info, text="普通成员投票，票数达标自动切歌",
+                  foreground="#888", font=(FONT, 8)).grid(
+            row=3, column=1, sticky="e", pady=(6, 0))
 
         vol_row = ttk.Frame(right)
         vol_row.grid(row=1, column=0, sticky="ew", pady=(6, 0))
@@ -382,6 +387,14 @@ class JusicGui:
     def _leave(self):
         self.client.leave_room()
         self._log("已离开房间", "muted")
+
+    def _skip_vote(self):
+        """切歌：普通成员为投票切歌（票数达标自动切），管理员直接切歌。"""
+        if not self.client.connected:
+            self._log("尚未连接房间，无法切歌", "warn")
+            return
+        self.client.skip_vote()
+        self._log("已发送切歌请求（投票切歌）…", "muted")
 
     # ---------------- 歌词（LRC）显示 ---------------- #
     def _begin_lyrics(self, lrc_text, duration_ms):

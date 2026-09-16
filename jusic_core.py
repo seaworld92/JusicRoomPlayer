@@ -278,6 +278,14 @@ def parse_frame(text):
     return mtype, body
 
 
+def stomp_frame(command, headers=None, body=""):
+    """构造 STOMP 帧文本（以 NUL 结尾）。"""
+    lines = [command]
+    for key, value in (headers or {}).items():
+        lines.append(f"{key}:{value}")
+    return "\n".join(lines) + "\n\n" + body + "\x00"
+
+
 # --------------------------------------------------------------------------- #
 # mpv 播放引擎
 # --------------------------------------------------------------------------- #
@@ -422,6 +430,7 @@ class RoomClient:
         self._loop = None
         self._cmd_q = None
         self._ready = threading.Event()
+        self._ws = None                   # 当前 WebSocket（仅事件循环线程访问）
         self._session_task = None
         self._leave_room = False
         self._playing_id = None
@@ -454,6 +463,14 @@ class RoomClient:
 
     def leave_room(self):
         self._submit(("leave",))
+
+    def command(self, destination: str, body: str = ""):
+        """向房间发送 STOMP SEND 指令（线程安全，异步执行）。"""
+        self._submit(("command", destination, body or ""))
+
+    def skip_vote(self):
+        """切歌：/music/skip/vote（普通成员为投票切歌，管理员将直接切歌）。"""
+        self.command("/music/skip/vote")
 
     def set_volume(self, value: int):
         self.engine.volume = max(0, min(100, int(value)))
@@ -493,6 +510,8 @@ class RoomClient:
                 await self._do_refresh(cmd[1] if len(cmd) > 1 else False)
             elif kind == "enter":
                 await self._do_enter(cmd[1], cmd[2])
+            elif kind == "command":
+                await self._do_command(cmd[1], cmd[2] if len(cmd) > 2 else "")
             elif kind == "leave":
                 await self._do_leave()
             elif kind == "stop":
@@ -514,6 +533,30 @@ class RoomClient:
                 self._log(f"共 {len(rooms)} 个房间")
         except Exception as exc:
             self._emit("error", f"获取房间列表失败: {exc}")
+
+    async def _do_command(self, destination, body=""):
+        """发送 STOMP SEND 指令。
+
+        注意：SockJS 的 WebSocket transport 要求客户端把 STOMP 帧放进
+        JSON 数组里发送（如 ["SEND\\n...\\x00"]），直接发明文会被服务端
+        以 c[1011] 关闭连接。
+        """
+        ws = self._ws
+        if ws is None:
+            self._emit("error", "尚未连接房间，无法发送指令")
+            return
+        try:
+            text = body or ""
+            data = text.encode("utf-8")
+            frame = stomp_frame("SEND", {
+                "destination": destination,
+                "content-type": "application/json;charset=utf-8",
+                "content-length": str(len(data)),
+            }, text)
+            await ws.send(json.dumps([frame]))
+            self._emit("command-sent", {"destination": destination})
+        except Exception as exc:
+            self._emit("error", f"发送指令失败: {exc}")
 
     async def _do_enter(self, room_id, password):
         if self._session_task and not self._session_task.done():
@@ -575,15 +618,27 @@ class RoomClient:
                     ping_timeout=12,
                 ) as ws:
                     retry = 0
-                    with self._lock:
-                        self.connected = True
-                    self._emit("connected", dict(self.room) if self.room else None)
-                    self._log(f"已进入房间：{self.room.get('name') if self.room else room_id}")
-                    while not self._leave_room:
-                        msg = await ws.recv()
-                        if isinstance(msg, bytes):
-                            msg = msg.decode("utf-8", "replace")
-                        self._handle_frame(parse_frame(msg))
+                    self._ws = ws
+                    try:
+                        # 发送 STOMP CONNECT 以便后续能发送指令（投票切歌等）。
+                        # SockJS websocket 要求把帧放进 JSON 数组发送。
+                        try:
+                            await ws.send(json.dumps([stomp_frame(
+                                "CONNECT",
+                                {"accept-version": "1.1,1.0", "heart-beat": "0,0"})]))
+                        except Exception:
+                            pass
+                        with self._lock:
+                            self.connected = True
+                        self._emit("connected", dict(self.room) if self.room else None)
+                        self._log(f"已进入房间：{self.room.get('name') if self.room else room_id}")
+                        while not self._leave_room:
+                            msg = await ws.recv()
+                            if isinstance(msg, bytes):
+                                msg = msg.decode("utf-8", "replace")
+                            self._handle_frame(parse_frame(msg))
+                    finally:
+                        self._ws = None
                 if not self._leave_room:
                     self._log("连接已断开")
                 break
