@@ -114,8 +114,8 @@ class JusicGui:
         root = self.root
         self._version = self._app_version()
         root.title(f"Jusic 房间播放器 v{self._version}（低内存 · mpv 内核）")
-        root.geometry("1000x640")
-        root.minsize(860, 520)
+        root.geometry("1000x720")
+        root.minsize(860, 560)
 
         style = ttk.Style(root)
         try:
@@ -286,6 +286,28 @@ class JusicGui:
         self.chat_var.trace_add("write", lambda *_: self._sync_chat_text())
         self._sync_chat_text()
 
+        # 聊天输入行（回车或点“发送”）
+        chat_row = ttk.Frame(right)
+        chat_row.grid(row=6, column=0, sticky="ew", pady=(4, 0))
+        chat_row.columnconfigure(0, weight=1)
+        self.chat_input = ttk.Entry(chat_row, font=(FONT, 9))
+        self.chat_input.grid(row=0, column=0, sticky="ew")
+        self.chat_input.bind("<Return>", lambda e: self._send_chat())
+        ttk.Button(chat_row, text="发送", width=6,
+                   command=self._send_chat).grid(row=0, column=1, padx=(4, 0))
+
+        # 昵称设置行（连接后自动应用；留空则用服务端默认昵称）
+        nick_row = ttk.Frame(right)
+        nick_row.grid(row=7, column=0, sticky="ew", pady=(4, 2))
+        nick_row.columnconfigure(1, weight=1)
+        ttk.Label(nick_row, text="昵称").grid(row=0, column=0, sticky="w")
+        self.nick_var = tk.StringVar(value="")
+        nick_entry = ttk.Entry(nick_row, textvariable=self.nick_var)
+        nick_entry.grid(row=0, column=1, sticky="ew", padx=(4, 4))
+        nick_entry.bind("<Return>", lambda e: self._apply_nickname())
+        ttk.Button(nick_row, text="设置", width=6,
+                   command=self._apply_nickname).grid(row=0, column=2)
+
         paned.add(left, weight=3)
         paned.add(right, weight=2)
 
@@ -395,6 +417,31 @@ class JusicGui:
             return
         self.client.skip_vote()
         self._log("已发送切歌请求（投票切歌）…", "muted")
+
+    def _send_chat(self):
+        """把输入框内容发送到房间聊天（服务端会广播回显到日志区）。"""
+        text = self.chat_input.get().strip()
+        if not text:
+            return
+        if not self.client.connected:
+            self._log("尚未连接房间，无法发送聊天", "warn")
+            return
+        if self.client.send_chat(text):
+            self.chat_input.delete(0, "end")
+        else:
+            self._log("消息为空，未发送", "warn")
+
+    def _apply_nickname(self):
+        """设置房间内昵称（留空则使用服务端默认昵称）。"""
+        name = self.nick_var.get().strip()
+        if not name:
+            self._log("请输入昵称（留空则使用服务端默认昵称）", "warn")
+            return
+        if not self.client.connected:
+            self._log("尚未连接房间，无法设置昵称", "warn")
+            return
+        self.client.set_nickname(name)
+        self._log(f"已发送昵称设置：{name}", "muted")
 
     # ---------------- 歌词（LRC）显示 ---------------- #
     def _begin_lyrics(self, lrc_text, duration_ms):
@@ -713,10 +760,14 @@ class JusicGui:
                         break
                 self._pending_reselect = None
         elif event == "connected":
-            name = (data or {}).get("name") if data else ""
+            info = data or {}
+            name = info.get("name") if info else ""
             self.room_var.set(f"房间：{name or '—'}")
             self.status_var.set(f"后端 https://{self.args.host}{MUSIC_API} ｜ 已连接 {name}")
             self._clear_lyrics()          # 新房间：先清空上一房间歌词
+            # 通道完全就绪后，若已填写昵称则自动应用
+            if info.get("ready") and self.nick_var.get().strip():
+                self.client.set_nickname(self.nick_var.get().strip())
         elif event == "reconnecting":
             self.status_var.set(f"后端 https://{self.args.host}{MUSIC_API} ｜ 重连中（{data}）")
         elif event == "music":

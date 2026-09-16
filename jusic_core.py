@@ -26,6 +26,7 @@ import string
 import subprocess
 import sys
 import threading
+import time
 import urllib.request
 from urllib.parse import urlparse
 
@@ -431,6 +432,7 @@ class RoomClient:
         self._cmd_q = None
         self._ready = threading.Event()
         self._ws = None                   # 当前 WebSocket（仅事件循环线程访问）
+        self._pending_cmds = []           # 连接建立前缓存的待发指令
         self._session_task = None
         self._leave_room = False
         self._playing_id = None
@@ -471,6 +473,26 @@ class RoomClient:
     def skip_vote(self):
         """切歌：/music/skip/vote（普通成员为投票切歌，管理员将直接切歌）。"""
         self.command("/music/skip/vote")
+
+    def send_chat(self, text: str):
+        """发送房间聊天消息：SEND /chat {content, sendTime}。"""
+        text = (text or "").strip()
+        if not text:
+            return False
+        body = json.dumps({"content": text, "sendTime": int(time.time() * 1000)},
+                          ensure_ascii=False)
+        self.command("/chat", body)
+        return True
+
+    def set_nickname(self, name: str):
+        """设置房间内昵称：SEND /setting/name {name, sendTime}。"""
+        name = (name or "").strip()
+        if not name:
+            return False
+        body = json.dumps({"name": name, "sendTime": int(time.time() * 1000)},
+                          ensure_ascii=False)
+        self.command("/setting/name", body)
+        return True
 
     def set_volume(self, value: int):
         self.engine.volume = max(0, min(100, int(value)))
@@ -535,7 +557,15 @@ class RoomClient:
             self._emit("error", f"获取房间列表失败: {exc}")
 
     async def _do_command(self, destination, body=""):
-        """发送 STOMP SEND 指令。
+        """发送 STOMP SEND 指令；连接尚未建立时先缓存，连上后自动补发。"""
+        if self._ws is None:
+            with self._lock:
+                self._pending_cmds.append((destination, body))
+            return
+        await self._send_now(destination, body)
+
+    async def _send_now(self, destination, body=""):
+        """立即发送 STOMP SEND 指令。
 
         注意：SockJS 的 WebSocket transport 要求客户端把 STOMP 帧放进
         JSON 数组里发送（如 ["SEND\\n...\\x00"]），直接发明文会被服务端
@@ -543,7 +573,8 @@ class RoomClient:
         """
         ws = self._ws
         if ws is None:
-            self._emit("error", "尚未连接房间，无法发送指令")
+            with self._lock:
+                self._pending_cmds.append((destination, body))
             return
         try:
             text = body or ""
@@ -630,7 +661,12 @@ class RoomClient:
                             pass
                         with self._lock:
                             self.connected = True
-                        self._emit("connected", dict(self.room) if self.room else None)
+                            pending, self._pending_cmds = self._pending_cmds, []
+                        for dest, payload in pending:      # 补发连接前缓存的指令
+                            await self._send_now(dest, payload)
+                        ready_payload = dict(self.room) if self.room else {}
+                        ready_payload["ready"] = True
+                        self._emit("connected", ready_payload)
                         self._log(f"已进入房间：{self.room.get('name') if self.room else room_id}")
                         while not self._leave_room:
                             msg = await ws.recv()
