@@ -94,6 +94,7 @@ class JusicGui:
         self._lyric_after = None
         self._current_music = None   # 最近一次 MUSIC（用于下载）
         self._downloading = False    # 是否有下载任务进行中
+        self._pending_reselect = None  # 刷新房间列表后要恢复选中的房间 id
 
         # 跨线程事件桥
         self.evq = queue.Queue()
@@ -267,12 +268,18 @@ class JusicGui:
         self.log.configure(yscrollcommand=ls.set)
         self.log.grid(row=0, column=0, sticky="nsew")
         ls.grid(row=0, column=1, sticky="ns")
-        self.chat_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(right, text="显示聊天", variable=self.chat_var).grid(
-            row=5, column=0, sticky="w", pady=(4, 0))
-        # 开/关后，是否接收聊天事件实时生效
-        self.chat_var.trace_add("write",
-                                lambda *_: setattr(self.client, "show_chat", self.chat_var.get()))
+        # “显示聊天”：默认开启；用 ☑️/☐ 文本样式（避免主题默认的打叉样式）
+        self.chat_var = tk.BooleanVar(value=True)
+        self.chat_btn = tk.Checkbutton(right, text="", variable=self.chat_var,
+                                       indicatoron=False, relief="flat", anchor="w",
+                                       cursor="hand2", font=(FONT, 9),
+                                       bg=self.root.cget("bg"),
+                                       activebackground=self.root.cget("bg"),
+                                       selectcolor=self.root.cget("bg"),
+                                       highlightthickness=0, borderwidth=0)
+        self.chat_btn.grid(row=5, column=0, sticky="w", pady=(4, 0))
+        self.chat_var.trace_add("write", lambda *_: self._sync_chat_text())
+        self._sync_chat_text()
 
         paned.add(left, weight=3)
         paned.add(right, weight=2)
@@ -291,10 +298,39 @@ class JusicGui:
         about_label.pack(side="right", padx=(8, 2))
         about_label.bind("<Button-1>", lambda e: self._show_about())
 
+        # 每 10 分钟自动刷新一次房间列表（静默，不打断操作/不刷屏）
+        self.root.after(10 * 60 * 1000, self._auto_refresh)
+
+    def _sync_chat_text(self):
+        """把“显示聊天”复选框渲染成 ☑️/☐ 文本，并同步是否接收聊天事件。"""
+        on = bool(self.chat_var.get())
+        self.client.show_chat = on
+        try:
+            self.chat_btn.configure(text=("☑️ 显示聊天" if on else "☐ 显示聊天"),
+                                    fg=("#0a6" if on else "#666"))
+        except Exception:
+            pass
+
+    def _auto_refresh(self):
+        """定时静默刷新房间列表，并尽量保留当前选中项。"""
+        try:
+            sel = self._selected_room()
+            self._pending_reselect = str(sel.get("id")) if sel else None
+            self.client.refresh_rooms(silent=True)
+        except Exception:
+            pass
+        finally:
+            try:
+                self.root.after(10 * 60 * 1000, self._auto_refresh)
+            except Exception:
+                pass
+
     # ===================================================================== #
     # 动作
     # ===================================================================== #
     def _refresh(self):
+        sel = self._selected_room()
+        self._pending_reselect = str(sel.get("id")) if sel else None
         self._log("正在获取房间列表…", "muted")
         self.client.refresh_rooms()
 
@@ -651,6 +687,18 @@ class JusicGui:
                                                      show="*", parent=self.root) or ""
                     self.client.enter_room(target, pwd)
                     self._log(f"自动进入房间：{target}", "muted")
+            # 刷新后恢复之前选中的房间（自动/手动刷新都适用）
+            if self._pending_reselect:
+                rid = str(self._pending_reselect)
+                for iid, room in self._room_by_iid.items():
+                    if str(room.get("id")) == rid:
+                        try:
+                            self.tree.selection_set(iid)
+                            self.tree.see(iid)
+                        except Exception:
+                            pass
+                        break
+                self._pending_reselect = None
         elif event == "connected":
             name = (data or {}).get("name") if data else ""
             self.room_var.set(f"房间：{name or '—'}")

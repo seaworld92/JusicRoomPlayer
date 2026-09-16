@@ -445,8 +445,9 @@ class RoomClient:
             if join and self._thread:
                 self._thread.join(timeout=5)
 
-    def refresh_rooms(self):
-        self._submit(("refresh",))
+    def refresh_rooms(self, silent: bool = False):
+        """silent=True 时不输出“正在获取房间列表…”等日志（用于定时自动刷新）。"""
+        self._submit(("refresh", silent))
 
     def enter_room(self, room_id: str, password: str = ""):
         self._submit(("enter", str(room_id), password or ""))
@@ -489,7 +490,7 @@ class RoomClient:
             cmd = await self._cmd_q.get()
             kind = cmd[0]
             if kind == "refresh":
-                await self._do_refresh()
+                await self._do_refresh(cmd[1] if len(cmd) > 1 else False)
             elif kind == "enter":
                 await self._do_enter(cmd[1], cmd[2])
             elif kind == "leave":
@@ -500,15 +501,17 @@ class RoomClient:
         self.engine.stop()
         self._emit("stopped")
 
-    async def _do_refresh(self):
-        self._log("正在获取房间列表…")
+    async def _do_refresh(self, silent: bool = False):
+        if not silent:
+            self._log("正在获取房间列表…")
         try:
             loop = asyncio.get_running_loop()
             rooms = await loop.run_in_executor(None, get_rooms, self.host)
             with self._lock:
                 self.rooms = rooms
             self._emit("rooms", rooms)
-            self._log(f"共 {len(rooms)} 个房间")
+            if not silent:
+                self._log(f"共 {len(rooms)} 个房间")
         except Exception as exc:
             self._emit("error", f"获取房间列表失败: {exc}")
 

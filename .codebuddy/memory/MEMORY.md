@@ -21,7 +21,7 @@
 - 目标服务器拒部分 TLS1.3 握手 → Python 固定 TLS1.2；websockets.connect(proxy=None) 绕本机系统代理 127.0.0.1:10808。
 - websockets 用 v15（additional_headers 参数；v17 有 bug）。
 - 播放引擎 mpv 0.41.0 位于 `C:\Program Files\MPV Player\mpv.exe`（winget id shinchiro.mpv）。
-- 实测内存：python≈37MB + mpv≈53MB。
+- 实测内存：命令行版 python≈37MB + mpv≈53MB ≈ 90MB；GUI 版（jusic_gui.py，2026-09-17 实测）python/tk≈55MB + mpv≈57MB ≈ 113MB。
 - PowerShell 命令含中文路径参数编码不可靠 → 用 ASCII 临时目录（如 %LOCALAPPDATA% 下）写 python runner，脚本内用 unicode 路径读写/测试。
 - 工作区是百度网盘同步盘：read_file 等工具对该盘某些文件可见性不稳；必要时用 python 直接读取确认。
 - 用户交流语言：简体中文。
