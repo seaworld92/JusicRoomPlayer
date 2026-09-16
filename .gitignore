@@ -1,0 +1,38 @@
+# ===========================================================================
+#  JusicRoomPlayer - .gitignore
+#  打包/运行产生的中间产物一律不入库；发布用 exe / zip 请走 Release 附件。
+# ===========================================================================
+
+# ---- Python 字节码与缓存 ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# ---- PyInstaller 打包产物与临时缓存（build_exe.bat / build_exe_dir.bat）----
+build/
+dist/
+*.spec
+*.manifest
+
+# ---- 运行期排错日志（冻结版写在 exe 同目录）----
+*.log
+
+# ---- 虚拟环境 ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- 编辑器 / 操作系统杂项 ----
+.vscode/
+.idea/
+*.swp
+*.swo
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ---- 临时文件 ----
+*.tmp
+~$*
