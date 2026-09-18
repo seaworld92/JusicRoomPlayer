@@ -13,6 +13,7 @@
 - `requirements.txt`（websockets==15.0.1）、`run.bat`、`run_gui.bat`、`README.md`。
 - 打包（2026-09-17 重写）：`build_exe.bat`=单文件 exe、`build_exe_dir.bat`=onedir+ZIP，均由 VERSION 取版本；开关 `-n` 跳过依赖、`-k` 保留缓存、`-d` 深度清缓存、`-h` 帮助。约定：`--distpath dist --workpath build --specpath build` + 入口绝对路径，**打包后自动清理 `build\` 工作目录与 `__pycache__`**，`.spec` 只生成在 `build\`（不再落仓库根）；不传 `--clean` 以复用 PyInstaller 全局分析缓存（重建仅 ~16–25s）。
 - 版本控制约定（2026-09-17）：新增 `.gitignore`，**`build/`、`dist/`、`*.spec` 不入库**（发布产物走 Release 附件）；`.codebuddy/memory/` 是有意跟踪的，勿忽略。
+- 发布流程（2026-09-18 新增 `publish_release.py`）：读 VERSION → 取 `dist\JusicRoomPlayer <ver>.exe` + `dist\JusicRoomPlayerPortable_<ver>.zip` → 在 GitHub/Gitee 建同名 tag 的 Release 并上传附件。纯标准库 urllib；凭证走环境变量 `GH_TOKEN`/`GITEE_TOKEN` 或 `--github-token/--gitee-token`；`git remote get-url` 自动解析 owner/repo（github=seaworld92/JusicRoomPlayer，origin=gitee seaworld/JusicRoomPlayer）；已存在 release/同名附件自动复用跳过（幂等）；`--dry-run` 无需凭证。**GitHub 会把附件名里的空格替换成点**（`JusicRoomPlayer 1.2.0.exe` → 远端 `JusicRoomPlayer.1.2.0.exe`）；Gitee API 的 `assets[].size` 恒为 0，不能用于校验。
 - 平台适配现状（2026-09-18 确认）：**仅 Windows 完整可用**。`jusic_tray.py` 的托盘（Shell_NotifyIconW/CreateIconFromResourceEx）是 Win32 专属，非 Windows 下 `IS_WINDOWS=False` → 占位 `TrayIcon.available()=False`，GUI 自动退化为普通最小化（窗口留在任务栏，不会藏窗口）；但**图标字节生成 `icon_image_bytes()` 是纯 Python 计算（math/struct），任何系统都能生成同样 4264 字节**。`MpvEngine.find_mpv` 路径偏 Windows（Program Files/WinGet，Linux 靠 PATH）、`run.bat` 仅 Windows。真正跨平台托盘需分平台实现或引入 pystray+Pillow，与低内存定位冲突，暂未做。
 
 ## 关键协议事实（勿忘）
