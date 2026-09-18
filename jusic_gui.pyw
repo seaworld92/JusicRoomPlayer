@@ -18,7 +18,9 @@ Jusic 房间播放器 · 图形界面版 (ttk/tkinter)
     * 左侧双击房间 / 选中后回车或点「进入房间」即可切换房间（密码房会询问密码）
     * 搜索框支持按房间名/简介过滤
     * 下方日志区显示连接/切歌/公告等动态；勾选“显示聊天”可看房间聊天流
-    * 音量滑块对下一首生效；关闭窗口即退出
+    * 音量滑块对下一首生效
+    * 最小化窗口时自动隐藏到系统托盘（后台继续播放）；双击托盘图标恢复窗口，
+      右键托盘图标弹出菜单可“显示主界面 / 退出程序”；关闭窗口即退出
 """
 
 import argparse
@@ -73,6 +75,10 @@ try:
                             download_file, guess_audio_ext, human_seconds,
                             lyric_index, parse_lyrics, sanitize_filename,
                             sort_rooms)
+    try:
+        from jusic_tray import TrayIcon      # 纯 ctypes 托盘（Windows）
+    except Exception:                        # 缺失/不支持时退化为普通最小化
+        TrayIcon = None
 except (ImportError, SystemExit) as exc:
     _fatal_error("缺少运行依赖，请先执行：\n\n"
                  "    python -m pip install -r requirements.txt\n\n"
@@ -99,12 +105,17 @@ class JusicGui:
         # 跨线程事件桥
         self.evq = queue.Queue()
 
+        # 系统托盘：最小化时驻留托盘、后台继续播放
+        self._tray = None
+        self._in_tray = False
+
         # 未显式指定 mpv 时，优先使用打进 exe 的内置 mpv
         mpv_path = args.mpv or bundled_mpv_path()
         self.client = RoomClient(host=args.host, volume=args.volume,
                                  mpv_path=mpv_path, listener=self._on_core_event)
 
         self._build_ui()
+        self._init_tray()
         root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ===================================================================== #
@@ -116,6 +127,8 @@ class JusicGui:
         root.title(f"Jusic 房间播放器 v{self._version}（低内存 · mpv 内核）")
         root.geometry("1000x720")
         root.minsize(860, 560)
+        # 最小化 → 隐藏到系统托盘（见 _on_unmap）
+        root.bind("<Unmap>", self._on_unmap)
 
         style = ttk.Style(root)
         try:
@@ -700,6 +713,72 @@ class JusicGui:
         text.configure(state="disabled")
         ttk.Button(win, text="关闭", command=win.destroy).pack(pady=(2, 8))
 
+    # ---------------- 系统托盘（最小化驻留） ---------------- #
+    def _init_tray(self):
+        """创建系统托盘图标；不可用时退化为普通最小化（不影响主功能）。"""
+        if TrayIcon is None or not TrayIcon.available():
+            return
+        try:
+            ver = getattr(self, "_version", "") or self._app_version()
+            self._tray = TrayIcon(
+                tooltip=f"Jusic 房间播放器 v{ver}（双击显示主界面）",
+                on_show=lambda: self.evq.put(("tray-show", None)),
+                on_quit=lambda: self.evq.put(("tray-quit", None)),
+            )
+            if not self._tray.start():
+                self._tray = None
+        except Exception:
+            self._tray = None
+
+    def _on_unmap(self, event):
+        """窗口被最小化（iconify）时，隐藏到系统托盘。"""
+        if event.widget is not self.root or self._tray is None:
+            return
+        try:
+            if self.root.state() == "iconic":
+                self.root.after(10, self._hide_to_tray)
+        except Exception:
+            pass
+
+    def _hide_to_tray(self):
+        if self._tray is None or self._in_tray:
+            return
+        try:
+            if self.root.state() != "iconic":
+                return
+            self._in_tray = True
+            self.root.withdraw()          # 收起窗口与任务栏按钮，仅保留托盘图标
+        except Exception:
+            self._in_tray = False
+            return
+        self._log("已最小化到系统托盘（双击托盘图标可恢复窗口）", "muted")
+        if not getattr(self, "_tray_tip_shown", False):
+            self._tray_tip_shown = True
+            self._tray.balloon("已最小化到系统托盘",
+                               "程序仍在后台播放：双击托盘图标恢复窗口，右键图标可退出程序。")
+
+    def _restore_from_tray(self):
+        """从系统托盘恢复主窗口。"""
+        if not self._in_tray:
+            return
+        self._in_tray = False
+        try:
+            self.root.deiconify()
+            self.root.state("normal")
+            self.root.lift()
+            self.root.focus_force()
+        except Exception:
+            pass
+        self._log("已从系统托盘恢复窗口", "muted")
+
+    def _stop_tray(self):
+        tray, self._tray = self._tray, None
+        if tray is not None:
+            try:
+                tray.stop()
+            except Exception:
+                pass
+
     def _on_close(self):
         try:
             # 先同步停 mpv（防止窗口关闭后仍有声音残留）
@@ -708,6 +787,7 @@ class JusicGui:
         except Exception:
             pass
         finally:
+            self._stop_tray()
             try:
                 self.root.destroy()
             except Exception:
@@ -814,6 +894,10 @@ class JusicGui:
         elif event == "dl-error":
             self._log(f"[下载失败] {data}", "warn")
             self.status_var.set(f"下载失败：{data}")
+        elif event == "tray-show":
+            self._restore_from_tray()
+        elif event == "tray-quit":
+            self._on_close()
         elif event == "log":
             self._log(data, "muted")
         elif event == "error":
@@ -890,6 +974,7 @@ def _main_impl(raw):
         root.mainloop()
     finally:
         # mainloop 结束后兜底清理（关闭窗口/异常等都会走到这里）
+        gui._stop_tray()
         gui.client.engine.stop()
         gui.client.stop()
 
