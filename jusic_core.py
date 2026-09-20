@@ -10,6 +10,7 @@ jusic_core：Jusic 房间播放器共享核心库
 * REST   : 房间列表 (POST /api/house/search)
 * WSS    : 直连后端 SockJS WebSocket，纯监听即可获得 MUSIC/PICK/ONLINE/CHAT 等推送
 * 播放   : 把 MUSIC 中的真实播放地址交给 mpv 进程（极轻量播放内核）
+* 音量   : 经 mpv 的 IPC 通道（命名管道/unix socket）即时下发，调整立即生效
 * 线程模型: RoomClient.start() 后自动在后台线程中运行 asyncio 事件循环，
             所有对外方法均为线程安全；状态通过 listener(evt, data) 回调传出。
 """
@@ -21,10 +22,12 @@ import os
 import random
 import re
 import shutil
+import socket
 import ssl
 import string
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
@@ -291,13 +294,98 @@ def stomp_frame(command, headers=None, body=""):
 # mpv 播放引擎
 # --------------------------------------------------------------------------- #
 class MpvEngine:
-    """每首新歌启动一个纯音频 mpv 进程，播完自动退出；内存占用小。"""
+    """每首新歌启动一个纯音频 mpv 进程，播完自动退出；内存占用小。
+
+    音量通过 mpv 的 IPC 通道下发（Windows 命名管道 / 其它平台 unix socket），
+    调整音量立即生效，不必等下一首。
+    """
 
     def __init__(self, volume: int = 90, mpv_path: str = ""):
         self._proc = None
         self._lock = threading.Lock()
         self.volume = max(0, min(100, int(volume)))
         self.mpv_path = mpv_path
+        # ---- 音量即时下发（IPC）---- #
+        self._ipc_seq = 0                        # 每首新歌 +1，生成互不冲突的 IPC 地址
+        self._ipc_path = ""                      # 当前 mpv 的 IPC 地址（"" = 无）
+        self._ipc_start_volume = self.volume     # 当前 mpv 启动时使用的音量
+        self._ipc_wake = threading.Event()
+        # 独立守护线程异步推送音量：即使 IPC 异常也不会卡住界面线程
+        self._ipc_thread = threading.Thread(target=self._pump_loop, daemon=True,
+                                            name="jusic-mpv-volume")
+        self._ipc_thread.start()
+
+    def set_volume(self, value: int) -> int:
+        """设置音量：立即作用于正在播放的 mpv，并记住供后续新歌使用。
+
+        实际下发在后台线程里完成（可能滞后几十毫秒），因此本方法永不阻塞。
+        """
+        self.volume = max(0, min(100, int(value)))
+        self._ipc_wake.set()
+        return self.volume
+
+    # ---------------- mpv IPC：音量下发 ---------------- #
+    @staticmethod
+    def _ipc_address(seq: int) -> str:
+        """本次播放使用的 IPC 地址（地址唯一，避免与残留/旧进程串线）。"""
+        if os.name == "nt":
+            return r"\\.\pipe\jusic-mpv-%d-%d" % (os.getpid(), seq)
+        return os.path.join(tempfile.gettempdir(),
+                            "jusic-mpv-%d-%d.sock" % (os.getpid(), seq))
+
+    @staticmethod
+    def _ipc_connect(path: str):
+        """连接 mpv 的 IPC，返回可 write/read/close 的对象。"""
+        if os.name == "nt":
+            return open(path, "r+b", buffering=0)
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.connect(path)
+        return sock.makefile("rwb", buffering=0)
+
+    def _ipc_push(self, path: str, volume: int) -> bool:
+        """把音量下发给 path 对应的 mpv，返回是否成功。
+
+        连接 → 写命令 → 读回执 → 关闭：mpv 每次只接受一个客户端连接，用完即关；
+        同一连接上并发读写会让 Windows 命名管道的写入永久阻塞，故保持单线程使用。
+        """
+        payload = json.dumps({"command": ["set_property", "volume", int(volume)]})
+        payload = payload.encode("utf-8") + b"\n"
+        try:
+            conn = MpvEngine._ipc_connect(path)
+        except Exception:
+            return False
+        try:
+            conn.write(payload)
+            conn.read(len(payload) + 128)     # 读掉回执，避免 mpv 输出侧堆积
+            return True
+        except Exception:
+            return False
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def _pump_loop(self):
+        """守护线程：把 self.volume 的变化异步下发给正在播放的 mpv。"""
+        gen, applied, misses = 0, None, 0
+        while True:
+            path = self._ipc_path
+            if self._ipc_seq != gen:                     # 换曲：新 mpv 已按启动音量起播
+                gen, misses = self._ipc_seq, 0
+                applied = self._ipc_start_volume
+            want = self.volume
+            if path and want != applied and misses < 40 and self.running():
+                time.sleep(0.02)                         # 合并拖动产生的中间值
+                want = self.volume
+                if self._ipc_push(path, want):
+                    applied = want
+                else:                                    # 管道可能尚未就绪，稍后重试
+                    misses += 1
+                    self._ipc_wake.wait(0.05)
+            else:
+                self._ipc_wake.wait(0.3)
+            self._ipc_wake.clear()
 
     @staticmethod
     def find_mpv(explicit=""):
@@ -336,6 +424,13 @@ class MpvEngine:
 
     def _stop_locked(self):
         proc = self._proc
+        ipc = self._ipc_path
+        self._ipc_path = ""
+        if ipc and os.name != "nt":
+            try:
+                os.remove(ipc)            # POSIX：清掉 unix socket 文件
+            except OSError:
+                pass
         if proc is None:
             return
         try:
@@ -364,6 +459,9 @@ class MpvEngine:
                     "找不到 mpv.exe。请先安装 mpv（winget install shinchiro.mpv）或"
                     "在设置里指定 mpv 路径。"
                 )
+            self._ipc_seq += 1
+            ipc = MpvEngine._ipc_address(self._ipc_seq)
+            volume = self.volume                 # 启动音量：即刻快照，供后续对比
             args = [
                 exe,
                 "--no-config", "--no-video", "--force-window=no",
@@ -372,7 +470,8 @@ class MpvEngine:
                 "--user-agent=Mozilla/5.0",
                 "--demuxer-max-bytes=8MiB",        # 限制内存缓存
                 "--demuxer-max-back-bytes=1MiB",
-                f"--volume={self.volume}",
+                f"--input-ipc-server={ipc}",       # 音量即时调用的通道
+                f"--volume={volume}",
                 url,
             ]
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
@@ -382,6 +481,9 @@ class MpvEngine:
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     creationflags=flags,
                 )
+                self._ipc_path = ipc
+                self._ipc_start_volume = volume
+                self._ipc_wake.set()               # 让音量线程接手最新音量
                 return True
             except Exception as exc:
                 self._proc = None
@@ -495,7 +597,8 @@ class RoomClient:
         return True
 
     def set_volume(self, value: int):
-        self.engine.volume = max(0, min(100, int(value)))
+        """调整音量：正在播放时立即生效（mpv IPC），并记忆供后续新歌使用。"""
+        return self.engine.set_volume(value)
 
     def _submit(self, item):
         if self._loop and self._cmd_q is not None:

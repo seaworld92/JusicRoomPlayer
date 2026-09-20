@@ -10,6 +10,7 @@
 - `jusic_core.py`：共享核心。含 RoomClient（后台 asyncio 线程 + listener(event,data) 回调）、MpvEngine、REST/WSS 协议、帧解析。**RoomClient._amain 必须设 self._loop = get_running_loop()**，否则线程安全请求被吞。
 - `jusic_room_player.py`：命令行前端；`jusic_gui.py`：ttk GUI 前端（需在 main 中 root.after 调度 _poll，GUI 线程桥=queue+after）。
 - GUI 功能：房间列表/搜索/切换、歌词 LRC 同步高亮、角落"关于·GPL-3.0"、**下载▾（保存当前歌曲音频 + .lrc 歌词，core.download_file 流式下载）**。
+- **音量即时生效（2026-09-20）**：每首 mpv 加 `--input-ipc-server=`（Win `\\.\pipe\jusic-mpv-<pid>-<seq>`，其它平台 tempdir 下 .sock），`MpvEngine.set_volume()` 只改值 + 唤醒常驻守护线程 `_pump_loop` 异步下发，GUI 永不阻塞；`_ipc_push` 必须**一次一连接**（写→读回执→关），因为同一 Windows 命名管道句柄上并发读写会永久阻塞。实测 ~0.02s 生效、300 次连发无失败。
 - `requirements.txt`（websockets==15.0.1）、`run.bat`、`run_gui.bat`、`README.md`。
 - 打包（2026-09-17 重写）：`build_exe.bat`=单文件 exe、`build_exe_dir.bat`=onedir+ZIP，均由 VERSION 取版本；开关 `-n` 跳过依赖、`-k` 保留缓存、`-d` 深度清缓存、`-h` 帮助。约定：`--distpath dist --workpath build --specpath build` + 入口绝对路径，**打包后自动清理 `build\` 工作目录与 `__pycache__`**，`.spec` 只生成在 `build\`（不再落仓库根）；不传 `--clean` 以复用 PyInstaller 全局分析缓存（重建仅 ~16–25s）。
 - 版本控制约定（2026-09-17）：新增 `.gitignore`，**`build/`、`dist/`、`*.spec` 不入库**（发布产物走 Release 附件）；`.codebuddy/memory/` 是有意跟踪的，勿忽略。
