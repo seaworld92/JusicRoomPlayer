@@ -19,6 +19,7 @@ Jusic 房间播放器 · 图形界面版 (ttk/tkinter)
     * 搜索框支持按房间名/简介过滤
     * 下方日志区显示连接/切歌/公告等动态；勾选“显示聊天”可看房间聊天流
     * 音量滑块即时生效（拖动过程中声音实时变化，无需等下一首）
+    * 在点歌队列里选中某首后点「👍 点赞选中歌曲」点赞成功会显示点赞标记（👍 列）
     * 点「点歌…」可按歌名/歌手搜索各音源曲库并加入房间队列（标准 320k / 高清 FLAC）
     * 点「分享房间…」可复制/打开直达链接，并生成二维码（手机扫码进房）
     * 最小化窗口时自动隐藏到系统托盘（后台继续播放）；双击托盘图标恢复窗口，
@@ -119,6 +120,13 @@ class JusicGui:
         self._pick_win = None
         self._pick_state = None
         self._pick_songs = {}
+
+        # 点赞：队列数据 / 行映射 / 本会话点过的歌 / 已点赞的歌（去重）
+        self._queue_songs = []
+        self._queue_by_iid = {}
+        self._liked_ids = set()
+        self._picked_ids = set()      # 本会话自己点过歌的 id（服务端点赞仅认这些）
+        self._last_like = None        # (歌曲id, 时间)：服务端拒绝时用来撤回 👍 标记
 
         # 未显式指定 mpv 时，优先使用打进 exe 的内置 mpv
         mpv_path = args.mpv or bundled_mpv_path()
@@ -278,16 +286,21 @@ class JusicGui:
         qf.grid(row=3, column=0, sticky="nsew", pady=(6, 0))
         qf.rowconfigure(0, weight=1)
         qf.columnconfigure(0, weight=1)
-        qcols = ("n", "d")
+        qcols = ("n", "d", "liked")
         self.queue_tree = ttk.Treeview(qf, columns=qcols, show="headings", height=6)
         self.queue_tree.heading("n", text="歌曲")
         self.queue_tree.heading("d", text="时长/点歌人")
-        self.queue_tree.column("n", width=230, anchor="w")
-        self.queue_tree.column("d", width=180, anchor="w")
+        self.queue_tree.heading("liked", text="点赞")
+        self.queue_tree.column("n", width=198, anchor="w")
+        self.queue_tree.column("d", width=148, anchor="w")
+        self.queue_tree.column("liked", width=54, anchor="center")
         qvs = ttk.Scrollbar(qf, orient="vertical", command=self.queue_tree.yview)
         self.queue_tree.configure(yscrollcommand=qvs.set)
         self.queue_tree.grid(row=0, column=0, sticky="nsew")
         qvs.grid(row=0, column=1, sticky="ns")
+        ttk.Button(qf, text="👍 点赞选中歌曲",
+                   command=self._like_selected_queue).grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         # 日志
         lf = ttk.Labelframe(right, text="动态/日志", padding=4)
@@ -705,10 +718,88 @@ class JusicGui:
         ok = self.client.pick_song(song.get("id"), name,
                                    song.get("source") or self._pick_source(), quality)
         if ok:
+            self._picked_ids.add(str(song.get("id")))     # 记为本会话自己点的歌
             self._log(f"点歌（{label}）：{name} - {artist}", "good")
             self._pick_status_var.set(f"已发送点歌请求（{label}）：{name} - {artist}")
         else:
             self._pick_status_var.set("点歌失败：歌曲 id 无效")
+
+    # ---------------- 点歌队列渲染 / 点赞 ---------------- #
+    def _render_queue(self):
+        """重绘点歌队列；「点赞」列显示本会话已点赞的歌曲（👍）。"""
+        pos = self.queue_tree.yview()[0]
+        self.queue_tree.delete(*self.queue_tree.get_children())
+        self._queue_by_iid.clear()
+        for i, song in enumerate(self._queue_songs, 1):
+            iid = str(i - 1)                 # 固定行号，便于按行取歌曲点赞
+            self._queue_by_iid[iid] = song
+            txt = f"{i}. {song.get('name') or ''} - {song.get('artist') or ''}"
+            sub = (f"{human_seconds(song.get('duration'))}　点："
+                   f"{song.get('nickName') or song.get('picker') or '?'}")
+            liked = "👍" if str(song.get("id")) in self._liked_ids else ""
+            self.queue_tree.insert("", "end", iid=iid, values=(txt[:44], sub[:36], liked))
+        if self._queue_songs:
+            try:
+                self.queue_tree.yview_moveto(pos)      # 重绘后保持滚动位置
+            except Exception:
+                pass
+
+    def _like_song(self, song, where="") -> bool:
+        """给指定歌曲点赞（对应网页端播放栏/队列的「点赞」）。
+
+        实测该后端按「点歌归属表」匹配：**只接受自己点的歌**，别人的歌会立刻回
+        NOTICE「点歌列表未发现此歌」；且点赞数并不下发（MUSIC 帧无计数字段，
+        网页端也只在本地 +1）。因此这里只发指令 + 日志说明 + 本房间内去重。
+        """
+        if not song or not str(song.get("id") or "").strip():
+            self._log("没有可以点赞的歌曲", "warn")
+            return False
+        if not self.client.connected:
+            self._log("尚未连接房间，无法点赞", "warn")
+            return False
+        sid = str(song.get("id"))
+        if sid in self._liked_ids:
+            self._log(f"这首已经点过赞了：{song.get('name') or sid}", "muted")
+            return False
+        if not self.client.good_song(sid):
+            self._log("点赞失败：歌曲 id 无效", "warn")
+            return False
+        self._liked_ids.add(sid)
+        self._last_like = (sid, time.monotonic())
+        note = "（房间已开启点赞排序，顺序可能随之调整）" if self.client.good_mode else ""
+        self._log(f"已发送点赞请求{where}：{song.get('name') or sid}"
+                  f" - {song.get('artist') or ''}{note}", "good")
+        if sid not in self._picked_ids:
+            self._log("  提示：服务端只接受「自己点的歌」点赞，别人的歌可能回"
+                      "“点歌列表未发现此歌”（本次会话没点过这首）", "muted")
+        self._render_queue()          # 队列里立刻显示 👍 标记
+        return True
+
+    def _rollback_last_like(self):
+        """服务端明确拒绝点赞时，撤回刚打上的 👍 标记（避免显示不实状态）。"""
+        last, self._last_like = self._last_like, None
+        if not last:
+            return False
+        sid, at = last
+        if time.monotonic() - at > 15:        # 太久的通知不再关联
+            return False
+        if sid in self._liked_ids:
+            self._liked_ids.discard(sid)
+            self._render_queue()
+            return True
+        return False
+
+    def _like_selected_queue(self):
+        """点赞点歌队列中选中的歌曲（房间开启点赞排序时会影响顺序）。"""
+        sel = self.queue_tree.selection()
+        if not sel:
+            self._log("请先在点歌队列中选择一首歌", "warn")
+            return
+        song = self._queue_by_iid.get(sel[0])
+        if not song:
+            self._log("这首歌已不在队列中，请等待队列刷新", "warn")
+            return
+        self._like_song(song, "队列")
 
     # ---------------- 分享房间（链接 / 二维码 / 小程序码） ---------------- #
     def _share_room(self):
@@ -1284,6 +1375,10 @@ class JusicGui:
             self.room_var.set(f"房间：{name or '—'}")
             self.status_var.set(f"后端 https://{self.args.host}{MUSIC_API} ｜ 已连接 {name}")
             self._clear_lyrics()          # 新房间：先清空上一房间歌词
+            self._liked_ids.clear()       # 新房间：清空本地点赞去重记录
+            self._picked_ids.clear()      # 新房间：自己点过的歌也随之失效
+            self._last_like = None
+            self._render_queue()          # 同步清掉队列里的 👍 标记
             # 通道完全就绪后，若已填写昵称则自动应用
             if info.get("ready") and self.nick_var.get().strip():
                 self.client.set_nickname(self.nick_var.get().strip())
@@ -1302,19 +1397,25 @@ class JusicGui:
             self._begin_lyrics(m.get("lyric") or "", m.get("duration"))
         elif event == "search":
             self._on_search_result(data or {})
+        elif event == "good-mode":
+            self._log("房间点赞排序：" + ("已开启（点赞会调整播放顺序）" if data
+                                          else "未开启（点赞不影响播放顺序）"), "muted")
         elif event == "online":
             self.online_var.set(f"在线 {data} 人")
         elif event == "queue":
-            self.queue_tree.delete(*self.queue_tree.get_children())
-            for i, s in enumerate(data or [], 1):
-                txt = f"{i}. {s.get('name') or ''} - {s.get('artist') or ''}"
-                sub = f"{human_seconds(s.get('duration'))}　点：{s.get('nickName') or s.get('picker') or '?'}"
-                self.queue_tree.insert("", "end", values=(txt[:46], sub[:42]))
+            self._queue_songs = list(data or [])
+            self._render_queue()
         elif event == "chat":
             if self.chat_var.get():
                 self._log(f"[聊天] {data.get('name')}: {data.get('text')}", "muted")
         elif event == "notice":
-            self._log(f"[通知] {data}", "warn")
+            text = str(data)
+            if "未发现此歌" in text:
+                rolled = self._rollback_last_like()
+                self._log("[点赞] 未生效：该后端只接受「自己点的歌」点赞"
+                          "（点歌归属不匹配）" + ("，已撤回点赞标记" if rolled else ""), "warn")
+            else:
+                self._log(f"[通知] {text}", "warn")
         elif event == "announce":
             self._log(f"[公告] {(data or {}).get('content', '')[:240]}", "warn")
         elif event == "dl-progress":

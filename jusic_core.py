@@ -332,7 +332,7 @@ EVENT_TYPES = {
     "AUTH_ROOT", "AUTH_ADMIN", "SEARCH", "SEARCH_PICTURE", "VOLUMN",
     "GOODMODEL", "SEARCH_HOUSE", "ENTER_HOUSE", "ENTER_HOUSE_START",
     "ADD_HOUSE", "ADD_HOUSE_START", "SEARCH_SONGLIST", "SEARCH_USER",
-    "ANNOUNCEMENT", "HOUSE_USER", "CIRCLEMODEL", "LISTMODEL",
+    "ANNOUNCEMENT", "HOUSE_USER", "CIRCLEMODEL", "LISTMODEL", "ROOM_STATE",
 }
 
 
@@ -586,6 +586,7 @@ class RoomClient:
       music       -> dict MUSIC(含 url/name/artist/lyric/duration/pictureUrl)
       queue       -> list[MUSIC]
       search      -> dict {songs: list, total: int, page: int}  点歌搜索结果
+      good-mode   -> bool  房间「点赞排序」是否开启
       online      -> int
       chat        -> dict  (仅 show_chat=True 时)
       notice      -> str
@@ -614,6 +615,7 @@ class RoomClient:
         self.search_source = "wy"
         self.search_page = 1
         self.search_total = 0
+        self.good_mode = False        # 房间是否开启「点赞排序」
 
         self._thread = None
         self._loop = None
@@ -723,6 +725,17 @@ class RoomClient:
             "sendTime": int(time.time() * 1000),
         }, ensure_ascii=False)
         self.command("/music/pick", body)
+        return True
+
+    def good_song(self, song_id):
+        """点赞歌曲：SEND /music/good/<id>（网页端播放栏「点赞」与队列点赞同款）。
+
+        点赞本身不改本地状态；房间若开启「点赞排序」，服务端会据此调整播放顺序
+        并推送新的 PICK 帧。同一首歌重复点赞由界面侧自行去重。
+        """
+        if song_id is None or not str(song_id).strip():
+            return False
+        self.command(f"/music/good/{quote(str(song_id), safe='')}", "{}")
         return True
 
     def set_volume(self, value: int):
@@ -986,6 +999,22 @@ class RoomClient:
             self.search_total = total
             self._emit("search", {"songs": songs, "total": total,
                                   "page": self.search_page, "ok": code_ok})
+
+        elif mtype == "GOODMODEL":
+            # 房间「点赞排序」开关：data 为 GOOD 表示已开启（与网页端判定一致）
+            if isinstance(data, bool):
+                enabled = data
+            else:
+                enabled = str(data).strip().upper() == "GOOD"
+            self.good_mode = enabled
+            self._emit("good-mode", enabled)
+
+        elif mtype == "ROOM_STATE" and isinstance(data, dict):
+            # 房间状态（部分后端版本在进房时推送，含 goodModel）
+            mode = data.get("goodModel")
+            if isinstance(mode, bool) and mode != self.good_mode:
+                self.good_mode = mode
+                self._emit("good-mode", mode)
 
         elif mtype == "ONLINE":
             with self._lock:

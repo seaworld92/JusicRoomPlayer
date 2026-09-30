@@ -28,6 +28,9 @@
 - 帧格式：a["TYPE\ncontent-type:application/json\ncontent-length:N\n\n{json}"]，解析取首行类型+末 json。
 - 点歌（SEND，已实测通过）：`/music/search {name,source,pageIndex,pageSize,sendTime}` → `SEARCH` 帧（`data.data` 歌曲数组、`data.totalSize` 总数）；`/music/pick {name,id,source,quality,sendTime}`，quality=320k|flac，成功推 NOTICE「点歌成功」+ 新 `PICK` 队列。同源还有 `/music/top {id}`、`/music/good/<id>`、`/music/clear`、`/music/delete {id}`（delete 实测对普通用户无效=房管权限）。
 - **搜索结果字段实测**：**无 `source`**（需用当前所选音源回填）、`fl`/`st` 藏在 `privilege` 子对象（`{"fl":1,"st":1}`，fl==0 或 st<0 视为不可用）、`album` 是**对象**（取 `album.name`）、有 `duration`(ms)/`picture_url`。
+- **点赞（2026-09-30，已实测）**：`SEND /music/good/<歌曲id>`，body `{}`；服务端按「点歌归属表」匹配，**只认自己（本会话）点的歌**——别人的歌立刻回 `NOTICE`「点歌列表未发现此歌」，自己点的歌静默接受；换会话后连自己的歌也会失败。点赞数不下发（MUSIC 帧无计数字段，官网 `#like-count` 只是本地 +1）。`GOODMODEL` 帧 = 房间「点赞排序」开关（data=="GOOD"，切换时才推）；`ROOM_STATE` 帧含 `goodModel`（EVENT_TYPES 已加）。core 有 `good_song()` 与 `good-mode` 事件。
+- **点赞入口（2026-09-30 用户要求调整后）**：GUI 只保留**点歌队列**的点赞（选中行 → 「👍 点赞选中歌曲」），队列有独立「点赞」列显示 👍；**「当前播放」标题右侧的点赞按钮已按用户要求删除**（`_like_current` 也删了）。收到「未发现此歌」会**自动撤回 👍 标记**（`_last_like` + `_rollback_last_like`）。CLI 对应 `like 序号`（`que`/`m` 行首 `[已赞]` 文本标记）。改队列渲染时记得：队列数据统一走 `_queue_songs` + `_render_queue()`，换房间清空点赞记录后**必须重绘队列**。
+- **删除自己点的歌（2026-09-30 实测有效）**：`SEND /music/delete {id: <歌名>}`（官网传 `String(song.name || song.id)`，**传歌名有效、传数字 id 无效/q静默**）→ 回 `NOTICE`「删除成功」；跨会话或他人的歌静默无响应。可用于将来做「移除我点的歌」。
 
 ## 环境约定（Windows 本机，重要）
 - 目标服务器拒部分 TLS1.3 握手 → Python 固定 TLS1.2；websockets.connect(proxy=None) 绕本机系统代理 127.0.0.1:10808。
