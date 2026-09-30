@@ -31,7 +31,7 @@ import tempfile
 import threading
 import time
 import urllib.request
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 try:
     import websockets
@@ -43,6 +43,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 DEFAULT_HOST = "tx.alang.run"           # Jusic 后端域名
 UI_URL = "https://happy.alang.run/modern-ui/"      # 网页 UI（协议同源）
+SHARE_UI_URL = UI_URL.rstrip("/")       # 分享链接前缀（与网页端 roomShareUrl 一致）
 MUSIC_API = "/api"                      # REST / WS 统一前缀
 
 MAX_ROOM_RETRY = 6                      # 断线最大自动重连次数
@@ -242,6 +243,34 @@ def get_rooms(host: str):
     if str(obj.get("code")) != "20000":
         raise RuntimeError(obj.get("message") or "房间列表接口返回异常")
     return obj.get("data") or []
+
+
+# --------------------------------------------------------------------------- #
+# 房间分享
+# --------------------------------------------------------------------------- #
+def room_share_url(room_id, password="") -> str:
+    """房间分享链接（与网页端 roomShareUrl() 完全一致）。
+
+    形如 https://happy.alang.run/modern-ui?houseId=xxx&housePwd=yyy
+    对方用浏览器打开即可直达该房间（密码房会把密码一并带上）。
+    """
+    return (f"{SHARE_UI_URL}?houseId={quote(str(room_id or ''), safe='')}"
+            f"&housePwd={quote(str(password or ''), safe='')}")
+
+
+def get_mini_code(host: str, room_id) -> str:
+    """POST /api/house/getMiniCode -> 微信小程序码（base64 图片字符串）。"""
+    code, text = api_post(host, MUSIC_API + "/house/getMiniCode",
+                          {"id": str(room_id or "")}, timeout=20)
+    if code != 200:
+        raise RuntimeError(f"小程序码请求失败 HTTP {code}")
+    obj = json.loads(text)
+    if str(obj.get("code")) != "20000":
+        raise RuntimeError(obj.get("message") or "小程序码接口返回异常")
+    data = obj.get("data")
+    if isinstance(data, dict):                     # 兼容 {img/base64: ...} 形式
+        data = data.get("img") or data.get("base64") or data.get("url") or ""
+    return data or ""
 
 
 # --------------------------------------------------------------------------- #

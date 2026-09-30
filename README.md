@@ -81,6 +81,11 @@ python jusic_room_player.py --mpv "C:\Program Files\MPV Player\mpv.exe"
 - **切歌（投票）** 按钮：向房间发送 `/music/skip/vote`；普通成员为投票切歌（票数达标自动切），管理员身份则直接切歌；
 - **聊天输入框 + 发送按钮**（回车也可）：把文字发送到房间聊天窗口；可先设置**昵称**（不填则用服务端默认昵称）；
 - **下载▾ 菜单**可保存当前正在播放的**歌曲音频**、**歌词（.lrc）**，或**两者一起下载**（歌词自动存为与音频同名的 `.lrc`）；
+- **分享房间…** 按钮：生成与网页端完全一致的**房间直达链接**
+  （`https://happy.alang.run/modern-ui?houseId=..&housePwd=..`），支持**复制到剪贴板**、
+  **浏览器打开**、**保存二维码 PNG**（手机扫码进房）以及**保存微信小程序码**；
+  二维码由纯 Python 生成（`jusic_qr.py`，不引入第三方库）。密码房按网页端规则把密码写入链接，
+  请只分享给可信的朋友；
 - **“显示聊天”默认开启**（☑️/☐ 样式，可在设置里开关）；房间列表**每 10 分钟自动刷新**一次（静默进行并保留选中项）；
 - **最小化到系统托盘**：点最小化按钮后窗口收进托盘图标（后台继续播放，不占任务栏）；
   **双击**托盘图标恢复窗口，**右键**图标弹出菜单可选“显示主界面 / 退出程序”
@@ -158,8 +163,9 @@ build_exe_dir.bat
 ├─ jusic_core.py          # 共享核心：REST/WSS 会话、事件化 RoomClient、mpv 引擎（无界面）
 ├─ jusic_room_player.py   # 命令行前端（复用 jusic_core）
 ├─ jusic_gui.py           # ttk/Tkinter 图形界面前端（复用 jusic_core）
-├─ jusic_gui.pyw          # 无控制台双击副本（可选）
+├─ jusic_gui.pyw          # 无控制台双击启动器（仅调用 jusic_gui，避免两份界面代码不同步）
 ├─ jusic_tray.py          # 系统托盘（Windows，纯 ctypes 调 Win32，最小化驻留）
+├─ jusic_qr.py            # 纯 Python 二维码生成（分享房间用，零第三方依赖）
 ├─ requirements.txt       # 依赖：websockets
 ├─ run.bat                # 命令行版一键启动
 ├─ run_gui.bat            # GUI（带控制台输出）备用启动

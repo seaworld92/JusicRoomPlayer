@@ -8,8 +8,11 @@
 
 ## 架构与产物（2026-09-03 起）
 - `jusic_core.py`：共享核心。含 RoomClient（后台 asyncio 线程 + listener(event,data) 回调）、MpvEngine、REST/WSS 协议、帧解析。**RoomClient._amain 必须设 self._loop = get_running_loop()**，否则线程安全请求被吞。
-- `jusic_room_player.py`：命令行前端；`jusic_gui.py`：ttk GUI 前端（需在 main 中 root.after 调度 _poll，GUI 线程桥=queue+after）。
+- `jusic_room_player.py`：命令行前端；`jusic_gui.py`：ttk GUI 前端（需在 main 中 root.after 调度 _poll，GUI 线程桥=queue+after）。`jusic_gui.pyw` 自 2026-09-30 起是**薄启动器**（只 `from jusic_gui import main`），不再是全量副本——两份界面代码曾因副本漂移而缺功能。
 - GUI 功能：房间列表/搜索/切换、歌词 LRC 同步高亮、角落"关于·GPL-3.0"、**下载▾（保存当前歌曲音频 + .lrc 歌词，core.download_file 流式下载）**。
+- **房间分享（2026-09-30）**：新增 `jusic_qr.py`（纯 Python 二维码：字节模式/等级 L-M-Q-H/自动版本 1-10/8 掩码按 ISO 4 规则择优/导出灰度 PNG，**零第三方依赖**）；`jusic_core` 增加 `SHARE_UI_URL`、`room_share_url()`、`get_mini_code()`；GUI「当前播放」面板加「分享房间…」→ 分享面板（复制链接/浏览器打开/保存二维码 PNG/微信小程序码/关闭），二维码用 tkinter Canvas 绘制（不依赖 Pillow）。
+  - 官网分享链接格式：`https://happy.alang.run/modern-ui?houseId=<id>&housePwd=<pwd>`（前端仓库 JumpAlang/Jusic-ui 的 `roomShareUrl()`，密文一并带上；进房时读 location.search 自动入房）。官网二维码为 QrcodeVue size=210 level=H。
+  - 小程序码接口：`POST /api/house/getMiniCode {"id":roomId}` → `data` 为 base64 JPEG。
 - **音量即时生效（2026-09-20）**：每首 mpv 加 `--input-ipc-server=`（Win `\\.\pipe\jusic-mpv-<pid>-<seq>`，其它平台 tempdir 下 .sock），`MpvEngine.set_volume()` 只改值 + 唤醒常驻守护线程 `_pump_loop` 异步下发，GUI 永不阻塞；`_ipc_push` 必须**一次一连接**（写→读回执→关），因为同一 Windows 命名管道句柄上并发读写会永久阻塞。实测 ~0.02s 生效、300 次连发无失败。
 - `requirements.txt`（websockets==15.0.1）、`run.bat`、`run_gui.bat`、`README.md`。
 - 打包（2026-09-17 重写）：`build_exe.bat`=单文件 exe、`build_exe_dir.bat`=onedir+ZIP，均由 VERSION 取版本；开关 `-n` 跳过依赖、`-k` 保留缓存、`-d` 深度清缓存、`-h` 帮助。约定：`--distpath dist --workpath build --specpath build` + 入口绝对路径，**打包后自动清理 `build\` 工作目录与 `__pycache__`**，`.spec` 只生成在 `build\`（不再落仓库根）；不传 `--clean` 以复用 PyInstaller 全局分析缓存（重建仅 ~16–25s）。
@@ -29,4 +32,6 @@
 - 实测内存：命令行版 python≈37MB + mpv≈53MB ≈ 90MB；GUI 版（jusic_gui.py，2026-09-17 实测）python/tk≈55MB + mpv≈57MB ≈ 113MB。
 - PowerShell 命令含中文路径参数编码不可靠 → 用 ASCII 临时目录（如 %LOCALAPPDATA% 下）写 python runner，脚本内用 unicode 路径读写/测试。
 - 工作区是百度网盘同步盘：read_file 等工具对该盘某些文件可见性不稳；必要时用 python 直接读取确认。
+- tkinter 陷阱（2026-09-30）：`ttk.Entry(textvariable=var)` 里 var 若为**函数局部变量**，函数返回后它被 GC → 控件文本变空。需持有引用，或（推荐）直接 `insert` 文本后置为 readonly。
+- 自研事物的验证套路（2026-09-30）：把参考库（如 segno）`pip install --target %TEMP%\<dir>` 临时安装做逐位对比，用后即删；二进制/图片类结果可借助在线服务（如 api.qrserver.com 的 read-qr-code）回读校验，再用 PIL ImageGrab 截图人工确认 GUI 效果。
 - 用户交流语言：简体中文。

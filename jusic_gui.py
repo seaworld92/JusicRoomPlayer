@@ -19,11 +19,13 @@ Jusic 房间播放器 · 图形界面版 (ttk/tkinter)
     * 搜索框支持按房间名/简介过滤
     * 下方日志区显示连接/切歌/公告等动态；勾选“显示聊天”可看房间聊天流
     * 音量滑块即时生效（拖动过程中声音实时变化，无需等下一首）
+    * 点「分享房间…」可复制/打开直达链接，并生成二维码（手机扫码进房）
     * 最小化窗口时自动隐藏到系统托盘（后台继续播放）；双击托盘图标恢复窗口，
       右键托盘图标弹出菜单可“显示主界面 / 退出程序”；关闭窗口即退出
 """
 
 import argparse
+import base64
 import os
 import queue
 import subprocess
@@ -31,6 +33,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import webbrowser
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 # ---- 双击/打包(冻结)启动支持 ----
@@ -70,11 +73,12 @@ def _fatal_error(msg: str) -> None:
 
 try:
     import websockets  # noqa: F401
+    import jusic_qr                          # 纯 Python 二维码（分享房间用）
     from jusic_core import (DEFAULT_HOST, MUSIC_API, UI_URL,
                             RoomClient, MpvEngine, DownloadCancelled,
-                            download_file, guess_audio_ext, human_seconds,
-                            lyric_index, parse_lyrics, sanitize_filename,
-                            sort_rooms)
+                            download_file, get_mini_code, guess_audio_ext,
+                            human_seconds, lyric_index, parse_lyrics,
+                            room_share_url, sanitize_filename, sort_rooms)
     try:
         from jusic_tray import TrayIcon      # 纯 ctypes 托盘（Windows）
     except Exception:                        # 缺失/不支持时退化为普通最小化
@@ -211,11 +215,16 @@ class JusicGui:
         self.online_var = tk.StringVar(value="—")
         ttk.Label(info, textvariable=self.room_var, foreground="#0a6").grid(row=2, column=0, sticky="w", pady=(4, 0))
         ttk.Label(info, textvariable=self.online_var, foreground="#06a").grid(row=2, column=1, sticky="e", pady=(4, 0))
-        ttk.Button(info, text="切歌（投票）", command=self._skip_vote).grid(
-            row=3, column=0, sticky="w", pady=(6, 0))
-        ttk.Label(info, text="普通成员投票，票数达标自动切歌",
+        act = ttk.Frame(info)
+        act.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        act.columnconfigure(1, weight=1)
+        ttk.Button(act, text="切歌（投票）",
+                   command=self._skip_vote).grid(row=0, column=0, sticky="w")
+        ttk.Button(act, text="分享房间…",
+                   command=self._share_room).grid(row=0, column=2, sticky="e")
+        ttk.Label(act, text="普通成员投票，票数达标自动切歌",
                   foreground="#888", font=(FONT, 8)).grid(
-            row=3, column=1, sticky="e", pady=(6, 0))
+            row=1, column=0, columnspan=3, sticky="w", pady=(2, 0))
 
         vol_row = ttk.Frame(right)
         vol_row.grid(row=1, column=0, sticky="ew", pady=(6, 0))
@@ -455,6 +464,191 @@ class JusicGui:
             return
         self.client.set_nickname(name)
         self._log(f"已发送昵称设置：{name}", "muted")
+
+    # ---------------- 分享房间（链接 / 二维码 / 小程序码） ---------------- #
+    def _share_room(self):
+        """生成当前房间的分享链接与二维码（与网页端「分享房间」等价）。"""
+        room = self.client.room
+        if not room:
+            self._log("尚未进入房间，无法分享", "warn")
+            messagebox.showinfo("还未进入房间",
+                                "请先进入一个房间，再使用分享功能。", parent=self.root)
+            return
+        url = room_share_url(room.get("id"), room.get("password") or "")
+        self._open_share_dialog(room, url)
+
+    def _open_share_dialog(self, room, url):
+        name = room.get("name") or room.get("id")
+        win = tk.Toplevel(self.root)
+        win.title("分享房间")
+        win.transient(self.root)
+        win.resizable(False, False)
+        try:
+            win.grab_set()
+        except Exception:
+            pass
+        try:                                    # 就近于主窗口显示，避免贴着屏幕边缘
+            self.root.update_idletasks()
+            win.geometry(f"+{self.root.winfo_rootx() + 90}+{self.root.winfo_rooty() + 70}")
+        except Exception:
+            pass
+
+        body = ttk.Frame(win, padding=10)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text=f"分享房间：{name}", font=(FONT, 12, "bold")).pack(anchor="w")
+        tip = ("朋友用浏览器打开链接即可直达本房间；密码已写入链接，"
+               "请只分享给可信的朋友。" if room.get("password") else
+               "朋友用浏览器打开链接即可直达本房间，一起实时听歌。")
+        ttk.Label(body, text=tip, foreground="#666", justify="left",
+                  wraplength=420).pack(anchor="w", pady=(2, 8))
+
+        link_row = ttk.Frame(body)
+        link_row.pack(fill="x")
+        link_row.columnconfigure(0, weight=1)
+        link = ttk.Entry(link_row, state="readonly", width=48)
+        link.grid(row=0, column=0, sticky="ew")
+        link.configure(state="normal")          # 直接写入文本，避免变量被回收后丢失
+        link.insert(0, url)
+        link.configure(state="readonly")
+        try:
+            link.selection_range(0, "end")      # 便于直接 Ctrl+C
+        except Exception:
+            pass
+
+        # 二维码（与网页端一致：静区 4 个模块，用 Canvas 直接绘制，无需图片库）
+        matrix = None
+        qr_box = ttk.Labelframe(body, text="扫码进房（手机相机 / 微信扫一扫）", padding=6)
+        try:
+            matrix = jusic_qr.encode(url)
+            self._draw_qr(qr_box, matrix)
+            qr_box.pack(pady=(10, 0))
+        except Exception as exc:
+            ttk.Label(qr_box, text=f"二维码生成失败：{exc}",
+                      foreground="#a60", wraplength=320).pack()
+            qr_box.pack(pady=(10, 0))
+
+        row1 = ttk.Frame(body)
+        row1.pack(fill="x", pady=(10, 0))
+        for col in range(3):
+            row1.columnconfigure(col, weight=1)
+        ttk.Button(row1, text="复制链接",
+                   command=lambda: self._copy_share_link(url, win)).grid(
+            row=0, column=0, sticky="ew")
+        ttk.Button(row1, text="浏览器打开",
+                   command=lambda: self._open_share_link(url)).grid(
+            row=0, column=1, sticky="ew", padx=4)
+        ttk.Button(row1, text="保存二维码",
+                   command=lambda: self._save_qr_png(matrix, name, win)).grid(
+            row=0, column=2, sticky="ew")
+
+        row2 = ttk.Frame(body)
+        row2.pack(fill="x", pady=(6, 0))
+        row2.columnconfigure(0, weight=1)
+        ttk.Button(row2, text="微信小程序码…",
+                   command=lambda: self._fetch_mini_code(room.get("id"), name)).grid(
+            row=0, column=0, sticky="ew")
+        ttk.Button(row2, text="关闭", width=8,
+                   command=win.destroy).grid(row=0, column=1, padx=(4, 0))
+        win.bind("<Escape>", lambda e: win.destroy())
+
+    def _draw_qr(self, parent, matrix):
+        """用 Canvas 逐模块绘制二维码（深色模块画成小方块）。"""
+        n = len(matrix)
+        scale = max(2, 210 // (n + 8))          # 目标边长约 210px（与网页端一致）
+        side = (n + 8) * scale
+        canvas = tk.Canvas(parent, width=side, height=side, bg="white",
+                           highlightthickness=0, borderwidth=0)
+        canvas.pack()
+        offset = 4 * scale                      # 标准静区：4 个模块
+        for r, row in enumerate(matrix):
+            y0 = offset + r * scale
+            for c, value in enumerate(row):
+                if value:
+                    x0 = offset + c * scale
+                    canvas.create_rectangle(x0, y0, x0 + scale, y0 + scale,
+                                            fill="#000000", outline="", width=0)
+        return canvas
+
+    def _copy_share_link(self, url, win=None):
+        parent = win or self.root
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(url)
+            self.root.update_idletasks()        # 刷新剪贴板，程序退出后内容仍保留
+        except Exception as exc:
+            self._log(f"复制链接失败：{exc}", "warn")
+            messagebox.showwarning("复制失败", f"请手动复制链接：\n\n{url}", parent=parent)
+            return
+        self._log("房间链接已复制到剪贴板", "good")
+        messagebox.showinfo("已复制", "房间链接已复制到剪贴板，发给朋友即可进房。",
+                            parent=parent)
+
+    def _open_share_link(self, url):
+        try:
+            webbrowser.open(url)
+            self._log("已在浏览器中打开分享链接", "muted")
+        except Exception as exc:
+            self._log(f"打开浏览器失败：{exc}", "warn")
+
+    def _save_qr_png(self, matrix, name, win=None):
+        parent = win or self.root
+        if not matrix:
+            messagebox.showwarning("无法保存", "二维码未生成成功，无法保存。", parent=parent)
+            return
+        path = filedialog.asksaveasfilename(
+            parent=parent, title="保存房间二维码",
+            initialfile=sanitize_filename(f"房间二维码-{name}") + ".png",
+            defaultextension=".png",
+            filetypes=[("PNG 图片", "*.png"), ("所有文件", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, "wb") as fh:
+                fh.write(jusic_qr.png_bytes(matrix, scale=8, border=4))
+            self._log(f"二维码已保存：{os.path.basename(path)}", "good")
+        except Exception as exc:
+            self._log(f"二维码保存失败：{exc}", "warn")
+
+    def _fetch_mini_code(self, room_id, name):
+        """拉取微信小程序码（后台线程，避免阻塞界面），完成后选择保存位置。"""
+        if not room_id:
+            return
+        self._log("正在获取微信小程序码…", "muted")
+
+        def worker():
+            try:
+                self.evq.put(("minicode", (get_mini_code(self.args.host, room_id), name)))
+            except Exception as exc:
+                self.evq.put(("minicode-error", f"{type(exc).__name__}: {exc}"))
+
+        threading.Thread(target=worker, daemon=True, name="jusic-minicode").start()
+
+    def _save_mini_code(self, raw, name):
+        text = str(raw or "").strip()
+        if text.startswith("data:") and "," in text:
+            text = text.split(",", 1)[1]
+        try:
+            blob = base64.b64decode(text, validate=False)
+        except Exception as exc:
+            self._log(f"小程序码解析失败：{exc}", "warn")
+            return
+        if not blob:
+            self._log("服务端未返回小程序码", "warn")
+            return
+        ext = ".jpg" if blob[:2] == b"\xff\xd8" else ".png"
+        path = filedialog.asksaveasfilename(
+            parent=self.root, title="保存微信小程序码",
+            initialfile=sanitize_filename(f"小程序码-{name}") + ext,
+            defaultextension=ext,
+            filetypes=[("图片文件", "*" + ext), ("所有文件", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, "wb") as fh:
+                fh.write(blob)
+            self._log(f"小程序码已保存：{os.path.basename(path)}", "good")
+        except Exception as exc:
+            self._log(f"小程序码保存失败：{exc}", "warn")
 
     # ---------------- 歌词（LRC）显示 ---------------- #
     def _begin_lyrics(self, lrc_text, duration_ms):
@@ -894,6 +1088,10 @@ class JusicGui:
         elif event == "dl-error":
             self._log(f"[下载失败] {data}", "warn")
             self.status_var.set(f"下载失败：{data}")
+        elif event == "minicode":
+            self._save_mini_code(*data)
+        elif event == "minicode-error":
+            self._log(f"小程序码获取失败：{data}", "warn")
         elif event == "tray-show":
             self._restore_from_tray()
         elif event == "tray-quit":
