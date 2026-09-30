@@ -19,6 +19,7 @@ Jusic 房间播放器 · 图形界面版 (ttk/tkinter)
     * 搜索框支持按房间名/简介过滤
     * 下方日志区显示连接/切歌/公告等动态；勾选“显示聊天”可看房间聊天流
     * 音量滑块即时生效（拖动过程中声音实时变化，无需等下一首）
+    * 点「点歌…」可按歌名/歌手搜索各音源曲库并加入房间队列（标准 320k / 高清 FLAC）
     * 点「分享房间…」可复制/打开直达链接，并生成二维码（手机扫码进房）
     * 最小化窗口时自动隐藏到系统托盘（后台继续播放）；双击托盘图标恢复窗口，
       右键托盘图标弹出菜单可“显示主界面 / 退出程序”；关闭窗口即退出
@@ -74,11 +75,12 @@ def _fatal_error(msg: str) -> None:
 try:
     import websockets  # noqa: F401
     import jusic_qr                          # 纯 Python 二维码（分享房间用）
-    from jusic_core import (DEFAULT_HOST, MUSIC_API, UI_URL,
+    from jusic_core import (DEFAULT_HOST, MUSIC_API, SONG_SOURCE_CODES, UI_URL,
                             RoomClient, MpvEngine, DownloadCancelled,
                             download_file, get_mini_code, guess_audio_ext,
                             human_seconds, lyric_index, parse_lyrics,
-                            room_share_url, sanitize_filename, sort_rooms)
+                            room_share_url, sanitize_filename, song_album,
+                            song_unavailable, sort_rooms, source_code)
     try:
         from jusic_tray import TrayIcon      # 纯 ctypes 托盘（Windows）
     except Exception:                        # 缺失/不支持时退化为普通最小化
@@ -112,6 +114,11 @@ class JusicGui:
         # 系统托盘：最小化时驻留托盘、后台继续播放
         self._tray = None
         self._in_tray = False
+
+        # 点歌面板（打开时才创建）与搜索结果上下文
+        self._pick_win = None
+        self._pick_state = None
+        self._pick_songs = {}
 
         # 未显式指定 mpv 时，优先使用打进 exe 的内置 mpv
         mpv_path = args.mpv or bundled_mpv_path()
@@ -217,9 +224,11 @@ class JusicGui:
         ttk.Label(info, textvariable=self.online_var, foreground="#06a").grid(row=2, column=1, sticky="e", pady=(4, 0))
         act = ttk.Frame(info)
         act.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(6, 0))
-        act.columnconfigure(1, weight=1)
+        act.columnconfigure(2, weight=1)
         ttk.Button(act, text="切歌（投票）",
                    command=self._skip_vote).grid(row=0, column=0, sticky="w")
+        ttk.Button(act, text="点歌…",
+                   command=self._open_pick_dialog).grid(row=0, column=1, sticky="w", padx=(6, 0))
         ttk.Button(act, text="分享房间…",
                    command=self._share_room).grid(row=0, column=2, sticky="e")
         ttk.Label(act, text="普通成员投票，票数达标自动切歌",
@@ -464,6 +473,242 @@ class JusicGui:
             return
         self.client.set_nickname(name)
         self._log(f"已发送昵称设置：{name}", "muted")
+
+    # ---------------- 点歌（搜索曲库 / 加入队列） ---------------- #
+    def _open_pick_dialog(self):
+        """打开点歌面板：搜索各音源曲库，选中后加入房间点歌队列。"""
+        if not self.client.connected:
+            self._log("尚未连接房间，无法点歌", "warn")
+            messagebox.showinfo("还未连接房间",
+                                "请先进入一个房间，再使用点歌功能。", parent=self.root)
+            return
+        win = getattr(self, "_pick_win", None)
+        if win is not None and win.winfo_exists():
+            win.lift()
+            win.focus_force()
+            return
+
+        win = tk.Toplevel(self.root)
+        self._pick_win = win
+        win.title("点歌")
+        win.transient(self.root)
+        win.minsize(560, 400)
+        win.geometry("660x480")
+        try:
+            self.root.update_idletasks()
+            win.geometry(f"+{self.root.winfo_rootx() + 140}+{self.root.winfo_rooty() + 80}")
+        except Exception:
+            pass
+        win.protocol("WM_DELETE_WINDOW", self._close_pick_dialog)
+        win.bind("<Escape>", lambda e: self._close_pick_dialog())
+
+        # 搜索结果上下文（关闭面板时清空）
+        self._pick_songs = {}          # 行 iid -> 歌曲 dict
+        self._pick_state = {"keyword": "", "page": 0, "songs": [], "total": 0,
+                            "loading": False, "token": 0}
+
+        body = ttk.Frame(win, padding=8)
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(2, weight=1)
+
+        # 搜索行：关键词 + 音源 + 搜索 / 热歌榜
+        search_row = ttk.Frame(body)
+        search_row.grid(row=0, column=0, sticky="ew")
+        search_row.columnconfigure(0, weight=1)
+        self._pick_kw_var = tk.StringVar()
+        kw_entry = ttk.Entry(search_row, textvariable=self._pick_kw_var)
+        kw_entry.grid(row=0, column=0, sticky="ew")
+        kw_entry.bind("<Return>", lambda e: self._pick_search(reset=True))
+        self._pick_src_var = tk.StringVar(value="网易")
+        ttk.Combobox(search_row, textvariable=self._pick_src_var, width=6,
+                     state="readonly", values=list(SONG_SOURCE_CODES)).grid(
+            row=0, column=1, padx=(6, 0))
+        self._pick_search_btn = ttk.Button(search_row, text="搜索",
+                                           command=lambda: self._pick_search(reset=True))
+        self._pick_search_btn.grid(row=0, column=2, padx=(6, 0))
+        ttk.Button(search_row, text="热歌榜",
+                   command=self._pick_hot).grid(row=0, column=3, padx=(4, 0))
+
+        self._pick_status_var = tk.StringVar(
+            value="输入歌名/歌手后点「搜索」；也可以点「热歌榜」看看热门金曲")
+        ttk.Label(body, textvariable=self._pick_status_var,
+                  foreground="#555").grid(row=1, column=0, sticky="w", pady=(6, 4))
+
+        # 结果列表
+        tree_box = ttk.Frame(body)
+        tree_box.grid(row=2, column=0, sticky="nsew")
+        tree_box.rowconfigure(0, weight=1)
+        tree_box.columnconfigure(0, weight=1)
+        cols = ("n", "a", "d")
+        self._pick_tree = ttk.Treeview(tree_box, columns=cols, show="headings", height=12)
+        self._pick_tree.heading("n", text="歌曲")
+        self._pick_tree.heading("a", text="歌手 · 专辑")
+        self._pick_tree.heading("d", text="时长")
+        self._pick_tree.column("n", width=250, anchor="w")
+        self._pick_tree.column("a", width=270, anchor="w")
+        self._pick_tree.column("d", width=70, anchor="center")
+        vs = ttk.Scrollbar(tree_box, orient="vertical", command=self._pick_tree.yview)
+        self._pick_tree.configure(yscrollcommand=vs.set)
+        self._pick_tree.grid(row=0, column=0, sticky="nsew")
+        vs.grid(row=0, column=1, sticky="ns")
+        self._pick_tree.bind("<Double-1>", lambda e: self._pick_send("320k"))
+        self._pick_tree.bind("<Return>", lambda e: self._pick_send("320k"))
+
+        # 操作行
+        btns = ttk.Frame(body)
+        btns.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        btns.columnconfigure(3, weight=1)
+        ttk.Button(btns, text="点歌 · 标准",
+                   command=lambda: self._pick_send("320k")).grid(row=0, column=0, sticky="w")
+        ttk.Button(btns, text="点歌 · 高清",
+                   command=lambda: self._pick_send("flac")).grid(row=0, column=1, padx=(6, 0))
+        self._pick_more_btn = ttk.Button(btns, text="加载更多", state="disabled",
+                                         command=lambda: self._pick_search(reset=False))
+        self._pick_more_btn.grid(row=0, column=2, padx=(6, 0))
+        ttk.Button(btns, text="关闭", width=8,
+                   command=self._close_pick_dialog).grid(row=0, column=4, sticky="e")
+
+        ttk.Label(body, text="双击结果 = 标准点歌；「高清」为 FLAC 音质。"
+                             "若房间禁止访客点歌，服务端会推送通知说明。",
+                  foreground="#888", font=(FONT, 8)).grid(row=4, column=0, sticky="w", pady=(6, 0))
+        kw_entry.focus_set()
+
+    def _close_pick_dialog(self):
+        win, self._pick_win = getattr(self, "_pick_win", None), None
+        self._pick_state = None
+        self._pick_songs = {}
+        if win is not None:
+            try:
+                win.destroy()
+            except Exception:
+                pass
+
+    def _pick_source(self):
+        try:
+            return source_code(self._pick_src_var.get())
+        except Exception:
+            return "wy"
+
+    def _pick_search(self, reset=True, keyword=None):
+        """发起搜索；reset=False 表示「加载更多」（页码 +1 并追加结果）。"""
+        st = getattr(self, "_pick_state", None)
+        if st is None or not self.client.connected:
+            return
+        if reset:
+            kw = (self._pick_kw_var.get() if keyword is None else keyword).strip()
+            if not kw:
+                self._pick_status_var.set("请输入歌名、歌手或关键词")
+                return
+            self._pick_kw_var.set(kw)
+            st.update({"keyword": kw, "page": 0, "songs": [], "total": 0})
+        page = st["page"] + 1
+        st["page"] = page
+        st["loading"] = True
+        st["token"] += 1
+        token = st["token"]
+        if not self.client.search_songs(st["keyword"], self._pick_source(), page):
+            st["loading"] = False
+            self._pick_status_var.set("搜索关键词为空")
+            return
+        self._pick_status_var.set(f"正在搜索「{st['keyword']}」（{st['page']}/{self._pick_source()}）…")
+        self._pick_more_btn.configure(state="disabled")
+        if reset:
+            self._render_pick_rows(keep_scroll=False)
+        self.root.after(8000, lambda: self._pick_timeout(token))
+
+    def _pick_hot(self):
+        """热歌榜：与网页端「热歌」面板一致，用 *热歌榜 作为关键词。"""
+        self._pick_search(reset=True, keyword="*热歌榜")
+
+    def _pick_timeout(self, token):
+        st = getattr(self, "_pick_state", None)
+        if not st or st.get("token") != token or not st.get("loading"):
+            return
+        st["loading"] = False
+        self._pick_status_var.set("搜索响应超时：请重试或换个音源")
+
+    def _on_search_result(self, data):
+        """核心层 "search" 事件：把结果渲染进点歌面板。"""
+        st = getattr(self, "_pick_state", None)
+        win = getattr(self, "_pick_win", None)
+        if st is None or win is None or not win.winfo_exists():
+            return
+        songs = list(data.get("songs") or [])
+        st["loading"] = False
+        st["token"] += 1                     # 让未触发的超时回调失效
+        if st["page"] <= 1:
+            st["songs"] = songs
+        else:
+            st["songs"].extend(songs)
+        st["total"] = int(data.get("total") or len(st["songs"]))
+        self._render_pick_rows()
+        if not st["songs"]:
+            self._pick_status_var.set(f"没有找到「{st['keyword']}」，换个关键词或音源试试")
+        else:
+            self._pick_status_var.set(f"共 {st['total']} 首，已显示 {len(st['songs'])} 首"
+                                      f"（音源 {self._pick_src_var.get()}）")
+
+    @staticmethod
+    def _song_unavailable(song) -> bool:
+        """搜索结果是否不可播（复用核心库判断，命令行版同源）。"""
+        return song_unavailable(song)
+
+    @staticmethod
+    def _album_label(album) -> str:
+        """专辑名：实测后端给的是对象 {"name": ...}，也兼容字符串。"""
+        return song_album({"album": album})
+
+    def _render_pick_rows(self, keep_scroll=True):
+        st = getattr(self, "_pick_state", None)
+        if st is None:
+            return
+        pos = self._pick_tree.yview()[0] if keep_scroll else 0.0
+        self._pick_tree.delete(*self._pick_tree.get_children())
+        self._pick_songs.clear()
+        for i, song in enumerate(st["songs"]):
+            iid = str(i)
+            self._pick_songs[iid] = song
+            artist = str(song.get("artist") or "未知歌手")
+            album = self._album_label(song.get("album"))
+            meta = f"{artist} · {album}" if album else artist
+            if self._song_unavailable(song):
+                meta = "[不可用] " + meta
+            self._pick_tree.insert("", "end", iid=iid, values=(
+                str(song.get("name") or "未知歌曲")[:34],
+                meta[:44],
+                human_seconds(song.get("duration")),
+            ))
+        if st["songs"]:
+            self._pick_tree.yview_moveto(pos)
+        more = len(st["songs"]) < st["total"]
+        self._pick_more_btn.configure(state=("normal" if more else "disabled"))
+
+    def _pick_send(self, quality: str = "320k"):
+        """把选中歌曲加入房间点歌队列（quality: 320k 标准 / flac 高清）。"""
+        sel = self._pick_tree.selection()
+        if not sel:
+            self._pick_status_var.set("请先在列表中选择一首歌")
+            return
+        song = self._pick_songs.get(sel[0])
+        if not song:
+            return
+        if self._song_unavailable(song):
+            self._pick_status_var.set("这首在当前音源不可用，换一首试试")
+            return
+        if not self.client.connected:
+            self._pick_status_var.set("尚未连接房间，无法点歌")
+            return
+        label = "高清(FLAC)" if quality == "flac" else "标准(320k)"
+        name = str(song.get("name") or "")
+        artist = str(song.get("artist") or "")
+        ok = self.client.pick_song(song.get("id"), name,
+                                   song.get("source") or self._pick_source(), quality)
+        if ok:
+            self._log(f"点歌（{label}）：{name} - {artist}", "good")
+            self._pick_status_var.set(f"已发送点歌请求（{label}）：{name} - {artist}")
+        else:
+            self._pick_status_var.set("点歌失败：歌曲 id 无效")
 
     # ---------------- 分享房间（链接 / 二维码 / 小程序码） ---------------- #
     def _share_room(self):
@@ -1055,6 +1300,8 @@ class JusicGui:
             self._log(f"[♪] {title} - {artist} {dur}", "music")
             # 歌词：LRC 解析 + 按本地起播时间同步滚动
             self._begin_lyrics(m.get("lyric") or "", m.get("duration"))
+        elif event == "search":
+            self._on_search_result(data or {})
         elif event == "online":
             self.online_var.set(f"在线 {data} 人")
         elif event == "queue":

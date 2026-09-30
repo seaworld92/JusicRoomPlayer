@@ -13,6 +13,8 @@
 - **房间分享（2026-09-30）**：新增 `jusic_qr.py`（纯 Python 二维码：字节模式/等级 L-M-Q-H/自动版本 1-10/8 掩码按 ISO 4 规则择优/导出灰度 PNG，**零第三方依赖**）；`jusic_core` 增加 `SHARE_UI_URL`、`room_share_url()`、`get_mini_code()`；GUI「当前播放」面板加「分享房间…」→ 分享面板（复制链接/浏览器打开/保存二维码 PNG/微信小程序码/关闭），二维码用 tkinter Canvas 绘制（不依赖 Pillow）。
   - 官网分享链接格式：`https://happy.alang.run/modern-ui?houseId=<id>&housePwd=<pwd>`（前端仓库 JumpAlang/Jusic-ui 的 `roomShareUrl()`，密文一并带上；进房时读 location.search 自动入房）。官网二维码为 QrcodeVue size=210 level=H。
   - 小程序码接口：`POST /api/house/getMiniCode {"id":roomId}` → `data` 为 base64 JPEG。
+- **点歌（2026-09-30）**：core 有 `SONG_SOURCE_CODES`(网易/QQ/酷我/酷狗/咪咕 → wy/qq/kw/kg/mg)、`source_code()`、`song_unavailable()`、`song_album()`、`RoomClient.search_songs()`/`pick_song()`，`SEARCH` 帧 → `search` 事件 `{songs,total,page,ok}`；GUI「点歌…」面板（关键词+音源+搜索/热歌榜 `*热歌榜`+结果表+标准/高清+加载更多）。
+  - 命令行版同源命令（2026-09-30）：`p 关键字` 搜歌、`pick 序号 [flac]`（别名 `点`）点歌、`pn` 加载更多、`ph` 热歌榜、`src [音源]` 切换音源，`--source` 启动参数；搜索用 `threading.Event` 同步等待（12s 超时），房间序号与歌曲序号靠 `pick` 前缀区分。
 - **音量即时生效（2026-09-20）**：每首 mpv 加 `--input-ipc-server=`（Win `\\.\pipe\jusic-mpv-<pid>-<seq>`，其它平台 tempdir 下 .sock），`MpvEngine.set_volume()` 只改值 + 唤醒常驻守护线程 `_pump_loop` 异步下发，GUI 永不阻塞；`_ipc_push` 必须**一次一连接**（写→读回执→关），因为同一 Windows 命名管道句柄上并发读写会永久阻塞。实测 ~0.02s 生效、300 次连发无失败。
 - `requirements.txt`（websockets==15.0.1）、`run.bat`、`run_gui.bat`、`README.md`。
 - 打包（2026-09-17 重写）：`build_exe.bat`=单文件 exe、`build_exe_dir.bat`=onedir+ZIP，均由 VERSION 取版本；开关 `-n` 跳过依赖、`-k` 保留缓存、`-d` 深度清缓存、`-h` 帮助。约定：`--distpath dist --workpath build --specpath build` + 入口绝对路径，**打包后自动清理 `build\` 工作目录与 `__pycache__`**，`.spec` 只生成在 `build\`（不再落仓库根）；不传 `--clean` 以复用 PyInstaller 全局分析缓存（重建仅 ~16–25s）。
@@ -24,6 +26,8 @@
 - 房间列表：POST /api/house/search，头 AccessToken: token，匿名可用。
 - 实时：WSS /api/server/000/<随机>/websocket?houseId&housePwd&connectType=enter；纯监听收 MUSIC(含可直接播放 url)/PICK/ONLINE/CHAT/公告；不要发非 sockjs 帧(会被 1007 关闭)；无需 STOMP。
 - 帧格式：a["TYPE\ncontent-type:application/json\ncontent-length:N\n\n{json}"]，解析取首行类型+末 json。
+- 点歌（SEND，已实测通过）：`/music/search {name,source,pageIndex,pageSize,sendTime}` → `SEARCH` 帧（`data.data` 歌曲数组、`data.totalSize` 总数）；`/music/pick {name,id,source,quality,sendTime}`，quality=320k|flac，成功推 NOTICE「点歌成功」+ 新 `PICK` 队列。同源还有 `/music/top {id}`、`/music/good/<id>`、`/music/clear`、`/music/delete {id}`（delete 实测对普通用户无效=房管权限）。
+- **搜索结果字段实测**：**无 `source`**（需用当前所选音源回填）、`fl`/`st` 藏在 `privilege` 子对象（`{"fl":1,"st":1}`，fl==0 或 st<0 视为不可用）、`album` 是**对象**（取 `album.name`）、有 `duration`(ms)/`picture_url`。
 
 ## 环境约定（Windows 本机，重要）
 - 目标服务器拒部分 TLS1.3 握手 → Python 固定 TLS1.2；websockets.connect(proxy=None) 绕本机系统代理 127.0.0.1:10808。
