@@ -1,5 +1,7 @@
 # Jusic 轻量房间播放器（Jusic Room Player）
 
+[English](README_EN.md) | 简体中文
+
 一个**占用内存尽可能小**的开源方案 Python 音乐播放器，用来直接播放
 「一起听歌吧」房间点歌台（[Jusic-Serve-Houses](https://github.com/JumpAlang/Jusic-Serve-Houses)）里正在播放的歌曲，
 并支持**房间列表 / 进入房间 / 随时切换房间**。提供三个前端：
@@ -294,7 +296,8 @@ build_exe_dir.bat
 ├─ build_exe_dir.bat      # 打包【便携版 ZIP】（内置 mpv，带版本）→ dist\JusicRoomPlayerPortable_<版本>.zip
 ├─ dist\JusicRoomPlayer <版本>.exe         # 单文件发行版（约 62MB）
 ├─ dist\JusicRoomPlayerPortable_<版本>.zip # 便携版发行 ZIP（约 62MB）
-└─ README.md
+├─ README.md              # 中文说明（本文件）
+└─ README_EN.md           # 英文说明（English README，便于发布到 GitHub / Gitee）
 ```
 
 ## 许可证
