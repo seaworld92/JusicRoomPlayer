@@ -92,6 +92,49 @@ except (ImportError, SystemExit) as exc:
                  f"详细信息：{exc}")
 
 FONT = "Microsoft YaHei UI"
+PICK_TREE_STYLE = "Pick.Treeview"        # 点歌结果列表专用样式（选中行高对比底色）
+PICK_SEL_FALLBACK = "#0d6efd"            # 拿不到主题色时的选中底色（通用蓝）
+
+
+def color_luminance(color: str) -> float:
+    """粗略感知亮度（0~255），用于挑对比色。"""
+    text = str(color).lstrip("#")
+    r, g, b = (int(text[i:i + 2], 16) for i in (0, 2, 4))
+    return 0.299 * r + 0.587 * g + 0.114 * b
+
+
+def contrast_text_color(bg: str, dark: str = "#111111", light: str = "#ffffff") -> str:
+    """按底色亮度选深/浅字色，保证任何主题下选中行上的文字都看得清。"""
+    try:
+        return dark if color_luminance(bg) > 150 else light
+    except Exception:
+        return light
+
+
+def pick_selection_colors(root, style=None) -> tuple:
+    """点歌结果列表「选中行」的（底色, 字色）。
+
+    普通 ``ttk.Treeview`` 没有 ``selectbackground`` 控件选项，只能通过自定义
+    样式设置；而部分主题（尤其深色主题）默认选中态几乎看不出来，所以这里显式
+    指定：优先跟随 ttkbootstrap 主题主色（主题界面版），主色与列表底色太接近
+    或取不到时用通用蓝兜底。
+    """
+    base = PICK_SEL_FALLBACK
+    try:
+        if style is None:
+            style = ttk.Style(root)
+        colors = getattr(style, "colors", None)      # 只有 ttkbootstrap 的 Style 有
+        primary = getattr(colors, "primary", None)
+        row_bg = getattr(colors, "bg", None)
+        if primary:
+            candidate = str(primary)
+            apart = (not row_bg) or abs(color_luminance(candidate)
+                                        - color_luminance(str(row_bg))) >= 60
+            if apart:
+                base = candidate
+    except Exception:
+        pass
+    return base, contrast_text_color(base)
 
 
 class JusicGui:
@@ -565,7 +608,9 @@ class JusicGui:
         self._pick_tree.configure(yscrollcommand=vs.set)
         self._pick_tree.grid(row=0, column=0, sticky="nsew")
         vs.grid(row=0, column=1, sticky="ns")
-        self._pick_tree.bind("<Double-1>", lambda e: self._pick_send("320k"))
+        # 选中行高亮（底色 + ▶ 前缀）：不再支持双击直接点歌，必须选中后点按钮
+        self._style_pick_tree()
+        self._pick_tree.bind("<<TreeviewSelect>>", self._pick_mark_selection)
         self._pick_tree.bind("<Return>", lambda e: self._pick_send("320k"))
 
         # 操作行
@@ -582,7 +627,8 @@ class JusicGui:
         ttk.Button(btns, text="关闭", width=8,
                    command=self._close_pick_dialog).grid(row=0, column=4, sticky="e")
 
-        ttk.Label(body, text="双击结果 = 标准点歌；「高清」为 FLAC 音质。"
+        ttk.Label(body, text="先单击选中歌曲（选中行会高亮并带 ▶ 标记），"
+                             "再点「点歌 · 标准」或「点歌 · 高清」（FLAC）。"
                              "若房间禁止访客点歌，服务端会推送通知说明。",
                   foreground="#888", font=(FONT, 8)).grid(row=4, column=0, sticky="w", pady=(6, 0))
         kw_entry.focus_set()
@@ -672,6 +718,51 @@ class JusicGui:
         """专辑名：实测后端给的是对象 {"name": ...}，也兼容字符串。"""
         return song_album({"album": album})
 
+    def _style_pick_tree(self):
+        """给点歌结果列表换一个「选中行很显眼」的样式。
+
+        普通 ttk.Treeview 没有 selectbackground 控件选项，只能配自定义样式；
+        默认样式的选中态在部分主题（尤其深色）下几乎看不出来，所以显式指定
+        主题主色为底色 + 自动对比字色，并对 !focus（列表失去键盘焦点）也保持
+        同样的颜色，避免点完其他地方后选中行变灰看不清。
+        """
+        tree = getattr(self, "_pick_tree", None)
+        if tree is None:
+            return
+        try:
+            if not tree.winfo_exists():
+                return
+        except Exception:
+            return
+        bg, fg = pick_selection_colors(self.root, getattr(self, "style", None))
+        try:
+            style = ttk.Style(self.root)
+            style.configure(PICK_TREE_STYLE, selectbackground=bg, selectforeground=fg)
+            style.map(PICK_TREE_STYLE,
+                      background=[("selected", bg)],
+                      foreground=[("selected", fg)])
+            tree.configure(style=PICK_TREE_STYLE)
+        except Exception:
+            pass
+
+    def _pick_mark_selection(self, event=None):
+        """选中行加「▶」前缀（配合底色，让选中哪首一眼可见）。"""
+        tree = getattr(self, "_pick_tree", None)
+        songs = getattr(self, "_pick_songs", None)
+        if tree is None or not songs:
+            return
+        try:
+            sel = tree.selection()
+        except Exception:
+            return
+        chosen = sel[0] if sel else None
+        for iid, song in list(songs.items()):
+            name = str(song.get("name") or "未知歌曲")[:34]
+            try:
+                tree.set(iid, "n", ("▶ " if iid == chosen else "") + name)
+            except Exception:
+                pass
+
     def _render_pick_rows(self, keep_scroll=True):
         st = getattr(self, "_pick_state", None)
         if st is None:
@@ -696,6 +787,7 @@ class JusicGui:
             self._pick_tree.yview_moveto(pos)
         more = len(st["songs"]) < st["total"]
         self._pick_more_btn.configure(state=("normal" if more else "disabled"))
+        self._pick_mark_selection()        # 重绘后保持「▶」标记
 
     def _pick_send(self, quality: str = "320k"):
         """把选中歌曲加入房间点歌队列（quality: 320k 标准 / flac 高清）。"""

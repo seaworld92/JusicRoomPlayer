@@ -131,6 +131,7 @@ class BootstrapGui(JusicGui):
         self._muted_widgets = []         # 跟随明暗主题变色的“次要文字”控件
         self._tinted = {}                # 已按当前主题处理过的对话框
         self._tint_keys = {}             # 对话框控件 -> 语义色名（供主题来回切换）
+        self._tick_after = None          # 进度条刷新定时器（关闭时取消，避免 bgerror）
         super().__init__(root, args)     # 内部完成 _build_ui / 托盘 / 关闭协议
         self._apply_theme(self._initial_theme(), save=False, quiet=True)
         self._tick_ui()
@@ -602,6 +603,8 @@ class BootstrapGui(JusicGui):
                                       "good": colors.success, "muted": muted})
         self._restyle_text(self.lyr, {"cur": colors.primary, "next": colors.fg,
                                       "muted": muted}, bold_tag="cur")
+        # 点歌弹窗的结果列表：选中行底色跟随主题主色（弹窗开着时切换主题也同步）
+        self._style_pick_tree()
 
     def _restyle_text(self, widget, tag_colors, bold_tag=None):
         colors = self.style.colors
@@ -721,6 +724,7 @@ class BootstrapGui(JusicGui):
 
     def _tick_ui(self):
         """每 0.5s 刷新播放进度条/时长，并顺带给新开的对话框换深色配色。"""
+        self._tick_after = None
         try:
             music = self._current_music or {}
             duration = int(music.get("duration") or 0)
@@ -740,7 +744,7 @@ class BootstrapGui(JusicGui):
         except Exception:
             pass
         try:
-            self.root.after(500, self._tick_ui)
+            self._tick_after = self.root.after(500, self._tick_ui)
         except Exception:
             pass                # 窗口已销毁时停止刷新
 
@@ -784,6 +788,12 @@ class BootstrapGui(JusicGui):
                    command=win.destroy).pack(pady=(2, 8))
 
     def _on_close(self):
+        try:
+            if self._tick_after:
+                self.root.after_cancel(self._tick_after)
+                self._tick_after = None
+        except Exception:
+            pass
         try:
             self._settings["theme"] = self._theme_name
             geometry = self.root.winfo_geometry()

@@ -44,5 +44,6 @@
 - 工作区是百度网盘同步盘：read_file 等工具对该盘某些文件可见性不稳；必要时用 python 直接读取确认。
 - tkinter 陷阱（2026-09-30）：`ttk.Entry(textvariable=var)` 里 var 若为**函数局部变量**，函数返回后它被 GC → 控件文本变空。需持有引用，或（推荐）直接 `insert` 文本后置为 readonly。
 - **ttk.Panedwindow 陷阱（2026-10-02）**：窗口还没映射完成时（paned 的 `winfo_width()` 仍是 1）调 `sashpos(0, N)` 会把分栏位置截成 0，**第一个窗格被压成 0 宽（内容 1x1，整个面板消失）**。必须等 `<Map>`/`<Configure>` 事件里 `winfo_ismapped()` 且宽度正常后再设，且只设一次（别再用 `after(120, ...)` 盲设）。排查这类“界面少了一块”的问题时，先打印各面板 `winfo_width/height`、`winfo_ismapped()` 与 `sashpos()`，别只看控件树里有没有数据。
+- **ttk.Treeview 选中行配色（2026-10-02，Tk 8.6.15 实测）**：`ttk::treeview` **没有任何颜色控件选项**（`tree.cget("selectbackground")` 直接 TclError，`configure()` 只有 12 个选项），只能走样式。做法是给列表挂一个派生样式（如 `Pick.Treeview`），同时 `style.configure(style, selectbackground=…, selectforeground=…)` **并且** `style.map(style, background=[("selected",…)], foreground=[("selected",…)])`——只 configure 时（clam）渲染可能仍用主题默认（本机为系统高亮色 #9e9a91），两者都设才在各主题下稳定可见。取主题色时注意：`tkinter.ttk.Style(root)` **不是** ttkbootstrap 的引擎（没有 `.colors`），要拿主色得用 `ttkbootstrap.Style` 实例或直接传 GUI 里的 `self.style`。
 - 自研事物的验证套路（2026-09-30）：把参考库（如 segno）`pip install --target %TEMP%\<dir>` 临时安装做逐位对比，用后即删；二进制/图片类结果可借助在线服务（如 api.qrserver.com 的 read-qr-code）回读校验，再用 PIL ImageGrab 截图人工确认 GUI 效果。
 - 用户交流语言：简体中文。
