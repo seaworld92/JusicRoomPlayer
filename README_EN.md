@@ -226,17 +226,26 @@ python jusic_room_player.py --house 73DlCti8 --chat --volume 60
 
 ## Building a Windows release (bundles mpv, versioned automatically)
 
-Use PyInstaller to pack the GUI **together with mpv** into an exe, so target machines need neither Python nor mpv.
+Use PyInstaller to pack the UI **together with mpv** into an exe, so target machines need neither Python nor mpv.
 **Artifacts are versioned automatically**: just edit the `VERSION` file in the repository root (e.g. `1.0.1`);
 the version then appears in the artifact filename and the exe properties (file/product version).
+
+Both scripts **package both UIs by default** (classic ttk UI + ttkbootstrap themed UI).
+Build only one of them with `-c` (classic) / `-t` (themed). Other switches:
+`-n` skip dependency install (fast rebuilds), `-k` keep intermediate caches for debugging,
+`-d` also purge the global PyInstaller / pip caches, `-h` help.
 
 **Single-file build** (easy to distribute as one file; slightly slower first launch):
 
 ```bat
-build_exe.bat
+build_exe.bat              :: default: classic + themed
+build_exe.bat -n -t        :: themed UI only
 ```
 
-Artifact: `dist\JusicRoomPlayer <version>.exe` (~62 MB).
+Artifacts:
+
+- `dist\JusicRoomPlayer <version>.exe` (classic UI, ~58 MB)
+- `dist\JusicRoomPlayerTheme <version>.exe` (themed UI, ~66 MB)
 
 **Portable ZIP** (no installation, fast startup, no per-launch extraction; the artifact is the ZIP itself):
 
@@ -244,14 +253,23 @@ Artifact: `dist\JusicRoomPlayer <version>.exe` (~62 MB).
 build_exe_dir.bat
 ```
 
-Artifact: `dist\JusicRoomPlayerPortable_<version>.zip` (~62 MB compressed, containing
-`_internal\_engine\mpv\mpv.exe`). After extraction the top level is the version folder; run
-`JusicRoomPlayerPortable_<version>.exe` inside it. Intermediate folders are cleaned up automatically after packaging.
+Artifacts:
 
-Both builds share these traits:
+- `dist\JusicRoomPlayerPortable_<version>.zip` (classic UI, ~58 MB compressed)
+- `dist\JusicRoomPlayerThemePortable_<version>.zip` (themed UI, ~66 MB compressed)
+
+Both embed `_internal\_engine\mpv\mpv.exe`. After extraction the top level is the version folder; run
+the exe with the same name inside it. Intermediate folders and the `build\` cache are cleaned up
+automatically after packaging.
+
+> The themed UI depends on ttkbootstrap (which pulls in Pillow), so it is ~8 MB larger and uses ~10 MB more memory;
+> pick the classic build if you want the smallest footprint. Note that `--exclude-module PIL` applies to the
+> classic build **only** (the themed build must keep Pillow) — do not mix the two when editing the build scripts.
+
+Both UIs share these traits:
 
 - The bundled mpv is discovered and used automatically; you can also switch to an external mpv via "选mpv…" at the bottom-right of the UI;
-- On a crash, `JusicRoomPlayer-error.log` is written next to the exe;
+- On a crash, `JusicRoomPlayer-error.log` is written next to the exe (the themed UI writes `JusicRoomPlayer-theme-error.log`);
 - Just hand it to other Windows users (if antivirus flags it, whitelist it or sign the exe).
 
 ## How it works (talking to the Jusic backend)
@@ -286,14 +304,16 @@ local-music-player/
 ├─ run_gui.bat            # alternative launcher for the GUI (with console output)
 ├─ VERSION               # version source (e.g. 1.0.0); used automatically in artifact names/properties
 ├─ make_version_file.py  # generates the exe version resource from VERSION (build helper)
-├─ make_zip.py           # zips the portable directory into a matching versioned ZIP (build helper)
-├─ publish_release.py    # publishes dist artifacts to GitHub / Gitee Releases (writes SHA256 and changelog)
+├─ make_zip.py           # zips a portable directory into a matching versioned ZIP (folder name can be passed in)
+├─ publish_release.py    # publishes the 4 dist artifacts to GitHub / Gitee Releases (writes SHA256 and changelog)
 ├─ tools\
 │  └─ mem_bench.py       # memory benchmark (compares real usage of each frontend; Windows only)
-├─ build_exe.bat          # build the single-file exe (bundles mpv, versioned) → dist\JusicRoomPlayer <version>.exe
-├─ build_exe_dir.bat      # build the portable ZIP (bundles mpv, versioned) → dist\JusicRoomPlayerPortable_<version>.zip
-├─ dist\JusicRoomPlayer <version>.exe         # single-file release (~62MB)
-├─ dist\JusicRoomPlayerPortable_<version>.zip # portable release ZIP (~62MB)
+├─ build_exe.bat          # build the single-file exe (bundles mpv, versioned; classic + themed UI by default)
+├─ build_exe_dir.bat      # build the portable ZIP (bundles mpv, versioned; classic + themed UI by default)
+├─ dist\JusicRoomPlayer <version>.exe              # classic UI · single-file release (~58MB)
+├─ dist\JusicRoomPlayerTheme <version>.exe         # themed UI · single-file release (~66MB)
+├─ dist\JusicRoomPlayerPortable_<version>.zip      # classic UI · portable release ZIP (~58MB)
+├─ dist\JusicRoomPlayerThemePortable_<version>.zip # themed UI · portable release ZIP (~66MB)
 ├─ README.md
 └─ README_EN.md
 ```

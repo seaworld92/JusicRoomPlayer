@@ -6,11 +6,15 @@
 publish_release.py —— 把 dist 下的发行产物发布到 GitHub / Gitee 的 Releases
 ================================================================================
 用途
-    读取根目录 VERSION，找到 dist 下的两个产物：
-        dist\\JusicRoomPlayer <版本>.exe
-        dist\\JusicRoomPlayerPortable_<版本>.zip
+    读取根目录 VERSION，找到 dist 下的四个产物（经典界面版 + 主题界面版）：
+        dist\\JusicRoomPlayer <版本>.exe                  经典 ttk 界面 · 单文件
+        dist\\JusicRoomPlayerTheme <版本>.exe             主题界面 · 单文件
+        dist\\JusicRoomPlayerPortable_<版本>.zip          经典 ttk 界面 · 便携版
+        dist\\JusicRoomPlayerThemePortable_<版本>.zip     主题界面 · 便携版
     在 GitHub 与 Gitee 上创建（已存在则复用）同名 tag 的 Release，
-    并把这两个文件作为 Release 附件上传；最后打印下载链接与 SHA256。
+    并把这四个文件作为 Release 附件上传；最后打印下载链接与 SHA256。
+    这四个产物由 build_exe.bat / build_exe_dir.bat 默认一次产出
+    （只想打其中一个界面时可用 -c / -t，但发布要求四个都齐全）。
 
 凭证
     GitHub : 环境变量 GH_TOKEN  （或 --github-token，需 repo 权限的 PAT）
@@ -85,18 +89,32 @@ def read_version():
 
 
 def artifacts(ver):
-    """返回 [(绝对路径, 上传后的附件文件名, 说明)]。"""
+    """返回 [(绝对路径, 上传后的附件文件名, 说明)]。
+
+    共 4 个产物：经典界面 / 主题界面 各一份「单文件 exe」与「便携版 ZIP」，
+    由 build_exe.bat 与 build_exe_dir.bat 默认一次全部产出。
+    """
     exe = f"JusicRoomPlayer {ver}.exe"
     zip_ = f"JusicRoomPlayerPortable_{ver}.zip"
+    exe_theme = f"JusicRoomPlayerTheme {ver}.exe"
+    zip_theme = f"JusicRoomPlayerThemePortable_{ver}.zip"
     items = [
-        (os.path.join(ROOT, "dist", exe), exe, "单文件版（内置 mpv，首次启动稍慢）"),
-        (os.path.join(ROOT, "dist", zip_), zip_, "便携版（解压即用，启动更快）"),
+        (os.path.join(ROOT, "dist", exe), exe,
+         "经典界面 · 单文件版（内置 mpv，首次启动稍慢）"),
+        (os.path.join(ROOT, "dist", zip_), zip_,
+         "经典界面 · 便携版（解压即用，启动更快）"),
+        (os.path.join(ROOT, "dist", exe_theme), exe_theme,
+         "主题界面版 · 单文件（ttkbootstrap 30 种主题，体积稍大）"),
+        (os.path.join(ROOT, "dist", zip_theme), zip_theme,
+         "主题界面版 · 便携版（ttkbootstrap 30 种主题，体积稍大）"),
     ]
     missing = [p for p, _, _ in items if not os.path.isfile(p)]
     if missing:
         for p in missing:
             log(f"        缺少: {p}")
-        fail("发行产物不完整，请先运行 build_exe.bat 与 build_exe_dir.bat")
+        fail("发行产物不完整（需要 4 个：经典/主题 x 单文件/便携）。"
+             "请先运行 build_exe.bat 与 build_exe_dir.bat（默认同时产出两个界面），"
+             "只有用 -c / -t 单打时才会缺件")
     return items
 
 
@@ -167,6 +185,11 @@ def build_notes(args, ver, items, sums):
         f"### Jusic 轻量房间播放器 {ver}",
         "",
         "本次发布包含以下 Windows 发行产物（**已内置 mpv 播放引擎**，目标机器无需安装 Python 或 mpv）：",
+        "",
+        "文件名带 `Theme` 的是 **ttkbootstrap 多主题界面版**"
+        "（内置 30 种主题，功能与经典版完全一致，"
+        "因连带 Pillow 而体积约多 8 MB、内存约多 10 MB）；"
+        "不带 `Theme` 的是经典 ttk 界面版。两个界面按需下载其一即可。",
         "",
         table,
         "",

@@ -228,17 +228,26 @@ python jusic_room_player.py --house 73DlCti8 --chat --volume 60
 
 ## 打包 Windows 发行版（内置 mpv，自动带版本号）
 
-用 PyInstaller 把 GUI 与 **mpv 一起打进 exe**，目标机器无需安装 Python / mpv。
+用 PyInstaller 把界面与 **mpv 一起打进 exe**，目标机器无需安装 Python / mpv。
 **产物自动带版本号**：版本号只需改根目录 `VERSION` 文件（如 `1.0.1`），
 打包后会体现在产物文件名与 exe 属性（文件版本/产品版本）。
+
+两个脚本**默认同时打包两个界面**（经典 ttk 界面 + ttkbootstrap 主题界面）；
+只想要其中一个时用 `-c`（只打经典）/ `-t`（只打主题）。其他开关：
+`-n` 跳过依赖安装（日常快速重建）、`-k` 保留中间缓存便于排错、
+`-d` 额外清理 PyInstaller / pip 全局缓存、`-h` 帮助。
 
 **单文件版**（便于单个文件分发，首次启动稍慢）：
 
 ```bat
-build_exe.bat
+build_exe.bat              :: 默认：经典 + 主题 都打
+build_exe.bat -n -t        :: 只打主题界面版
 ```
 
-产物：`dist\JusicRoomPlayer <版本>.exe`（约 62 MB）。
+产物：
+
+- `dist\JusicRoomPlayer <版本>.exe`（经典界面，约 58 MB）
+- `dist\JusicRoomPlayerTheme <版本>.exe`（主题界面，约 66 MB）
 
 **便携版 ZIP**（免安装、启动快、不每次解压；产物直接是 ZIP）：
 
@@ -246,14 +255,22 @@ build_exe.bat
 build_exe_dir.bat
 ```
 
-产物：`dist\JusicRoomPlayerPortable_<版本>.zip`（约 62 MB 压缩，含
-`_internal\_engine\mpv\mpv.exe`）。解压后顶层即版本文件夹，运行其中的
-`JusicRoomPlayerPortable_<版本>.exe` 即可；打包完成后中间文件夹会被自动清理。
+产物：
 
-两个版本共同特性：
+- `dist\JusicRoomPlayerPortable_<版本>.zip`（经典界面，约 58 MB 压缩）
+- `dist\JusicRoomPlayerThemePortable_<版本>.zip`（主题界面，约 66 MB 压缩）
+
+两者都内置 `_internal\_engine\mpv\mpv.exe`。解压后顶层即版本文件夹，运行其中的同名 exe
+即可；打包完成后中间文件夹与 `build\` 缓存会被自动清理。
+
+> 主题界面版依赖 ttkbootstrap（连带 Pillow），因此体积多约 8 MB、内存多约 10 MB；
+> 追求最小体积/内存请用经典版。脚本里 `--exclude-module PIL` **只对经典版生效**
+> （主题版必须保留 Pillow），改动打包脚本时注意不要混用。
+
+两个界面共同特性：
 
 - 内置 mpv 自动发现并使用；也可用界面右下角“选mpv…”改为外部 mpv；
-- 程序异常时会在 exe 同目录写 `JusicRoomPlayer-error.log`；
+- 程序异常时会在 exe 同目录写 `JusicRoomPlayer-error.log`（主题界面版为 `JusicRoomPlayer-theme-error.log`）；
 - 分发给其他 Windows 用户即可（如被杀软误报，可加白名单或对 exe 签名）。
 
 ## 工作原理（对接 Jusic 后端）
@@ -288,14 +305,16 @@ build_exe_dir.bat
 ├─ run_gui.bat            # GUI（带控制台输出）备用启动
 ├─ VERSION               # 版本号来源（如 1.0.0），打包产物名/属性自动使用
 ├─ make_version_file.py  # 由 VERSION 生成 exe 版本资源（build 用）
-├─ make_zip.py           # 把便携版目录压成同版本 ZIP（build 用）
-├─ publish_release.py    # 把 dist 产物发布到 GitHub / Gitee Releases（自动写 SHA256 与变更）
+├─ make_zip.py           # 把便携版目录压成同版本 ZIP，可传入文件夹名（build 用）
+├─ publish_release.py    # 把 dist 的 4 个产物发布到 GitHub / Gitee Releases（自动写 SHA256 与变更）
 ├─ tools\
 │  └─ mem_bench.py       # 内存基准测试（对比各前端实际占用，仅 Windows）
-├─ build_exe.bat          # 打包【单文件】exe（内置 mpv，带版本）→ dist\JusicRoomPlayer <版本>.exe
-├─ build_exe_dir.bat      # 打包【便携版 ZIP】（内置 mpv，带版本）→ dist\JusicRoomPlayerPortable_<版本>.zip
-├─ dist\JusicRoomPlayer <版本>.exe         # 单文件发行版（约 62MB）
-├─ dist\JusicRoomPlayerPortable_<版本>.zip # 便携版发行 ZIP（约 62MB）
+├─ build_exe.bat          # 打【单文件】exe（内置 mpv，带版本；默认同时打经典界面与主题界面）
+├─ build_exe_dir.bat      # 打【便携版 ZIP】（内置 mpv，带版本；默认同时打经典界面与主题界面）
+├─ dist\JusicRoomPlayer <版本>.exe              # 经典界面 · 单文件发行版（约 58MB）
+├─ dist\JusicRoomPlayerTheme <版本>.exe         # 主题界面 · 单文件发行版（约 66MB）
+├─ dist\JusicRoomPlayerPortable_<版本>.zip      # 经典界面 · 便携版发行 ZIP（约 58MB）
+├─ dist\JusicRoomPlayerThemePortable_<版本>.zip # 主题界面 · 便携版发行 ZIP（约 66MB）
 ├─ README.md              # 中文说明（本文件）
 └─ README_EN.md           # 英文说明（English README，便于发布到 GitHub / Gitee）
 ```

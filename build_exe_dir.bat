@@ -1,23 +1,30 @@
 @echo off
 rem ===========================================================================
-rem  build_exe_dir.bat  --  build JusicRoomPlayerPortable folder build + ZIP
+rem  build_exe_dir.bat  --  build JusicRoomPlayer portable folder builds + ZIPs
 rem ---------------------------------------------------------------------------
 rem  Usage:  build_exe_dir.bat [options]
 rem    -n, --no-deps      skip dependency install / upgrade step
-rem    -k, --keep-cache   keep PyInstaller work dir and unpacked folder
+rem    -k, --keep-cache   keep PyInstaller work dir and unpacked folders
 rem    -d, --deep         additionally purge PyInstaller global cache + pip cache
+rem    -c, --classic      build only the classic ttk UI     [jusic_gui.py]
+rem    -t, --theme        build only the ttkbootstrap UI    [jusic_gui_bootstrap.py]
+rem    -a, --all          build both  [default]
 rem    -h, --help         show this help
 rem ---------------------------------------------------------------------------
-rem  All PyInstaller scratch data (work dir + generated .spec) is written under
+rem  Both front-ends are packaged by default:
+rem    dist\JusicRoomPlayerPortable_<VERSION>.zip         classic ttk UI
+rem    dist\JusicRoomPlayerThemePortable_<VERSION>.zip    ttkbootstrap theme UI
+rem  Every PyInstaller scratch file (work dir + generated .spec) is written under
 rem  .\build and removed again after the build, so nothing is left behind.
-rem  Output: dist\JusicRoomPlayerPortable_<VERSION>.zip   (mpv embedded)
 rem ===========================================================================
 setlocal
 cd /d "%~dp0"
 chcp 65001 >nul
 
 set "APPNAME=JusicRoomPlayerPortable"
-set "ENTRY=%~dp0jusic_gui.py"
+set "APPNAME_THEME=JusicRoomPlayerThemePortable"
+set "ENTRY_CLASSIC=%~dp0jusic_gui.py"
+set "ENTRY_THEME=%~dp0jusic_gui_bootstrap.py"
 set "MPV=C:\Program Files\MPV Player\mpv.exe"
 set "WORKDIR=%~dp0build"
 set "DISTDIR=%~dp0dist"
@@ -26,6 +33,8 @@ rem ---- option defaults ----
 set "SKIP_DEPS="
 set "KEEP_CACHE="
 set "DEEP="
+set "DO_CLASSIC=1"
+set "DO_THEME=1"
 
 rem ---- parse command line ----
 :parse
@@ -38,6 +47,12 @@ if /i "%~1"=="-k"           goto :opt_keep
 if /i "%~1"=="--keep-cache" goto :opt_keep
 if /i "%~1"=="-d"           goto :opt_deep
 if /i "%~1"=="--deep"       goto :opt_deep
+if /i "%~1"=="-c"           goto :opt_classic
+if /i "%~1"=="--classic"    goto :opt_classic
+if /i "%~1"=="-t"           goto :opt_theme
+if /i "%~1"=="--theme"      goto :opt_theme
+if /i "%~1"=="-a"           goto :opt_all
+if /i "%~1"=="--all"        goto :opt_all
 echo [WARN] Unknown option ignored: %~1   -- see -h for help
 shift
 goto :parse
@@ -54,7 +69,27 @@ goto :parse
 set "DEEP=1"
 shift
 goto :parse
+:opt_classic
+set "DO_THEME="
+shift
+goto :parse
+:opt_theme
+set "DO_CLASSIC="
+shift
+goto :parse
+:opt_all
+set "DO_CLASSIC=1"
+set "DO_THEME=1"
+shift
+goto :parse
 :parsed
+
+rem ---- -c together with -t means "both" ----
+if defined DO_CLASSIC goto :sel_ok
+if defined DO_THEME goto :sel_ok
+set "DO_CLASSIC=1"
+set "DO_THEME=1"
+:sel_ok
 
 echo ============================================================
 echo  Build %APPNAME%  --  onedir, auto ZIP, versioned
@@ -66,43 +101,52 @@ if errorlevel 1 (
     echo [ERROR] "python" not found in PATH. Install Python 3.10+ first.
     goto :err
 )
-if not exist "%ENTRY%" (
-    echo [ERROR] Entry script missing: "%ENTRY%"
-    goto :err
-)
+if not defined DO_CLASSIC goto :ck_theme
+if exist "%ENTRY_CLASSIC%" goto :ck_theme
+echo [ERROR] Entry script missing: "%ENTRY_CLASSIC%"
+goto :err
+:ck_theme
+if not defined DO_THEME goto :ck_done
+if exist "%ENTRY_THEME%" goto :ck_done
+echo [ERROR] Entry script missing: "%ENTRY_THEME%"
+goto :err
+:ck_done
 
 rem ---- read version from VERSION file ----
 set "VER="
 if exist "%~dp0VERSION" for /f "usebackq delims=" %%v in ("%~dp0VERSION") do set "VER=%%v"
 if "%VER%"=="" set "VER=0.0.0"
-set "OUTDIR=%DISTDIR%\%APPNAME%_%VER%"
-set "ZIPFILE=%DISTDIR%\%APPNAME%_%VER%.zip"
+set "STEM_CLASSIC=%APPNAME%_%VER%"
+set "STEM_THEME=%APPNAME_THEME%_%VER%"
+set "ZIP_CLASSIC=%DISTDIR%\%STEM_CLASSIC%.zip"
+set "ZIP_THEME=%DISTDIR%\%STEM_THEME%.zip"
 echo Version : %VER%
-echo Target  : %ZIPFILE%
+if defined DO_CLASSIC echo Target  : %ZIP_CLASSIC%
+if defined DO_THEME   echo Target  : %ZIP_THEME%
 
 rem ---- start timer ----
 set "T0=0"
 for /f "delims=" %%t in ('python -c "import time;print(int(time.time()))" 2^>nul') do set "T0=%%t"
 
-rem ---- [1/7] dependencies ----
+rem ---- [1/6] dependencies ----
 if defined SKIP_DEPS goto :deps_skip
-echo [1/7] Install / refresh dependencies ...
+echo [1/6] Install / refresh dependencies ...
 python -m pip install --upgrade pyinstaller
 if errorlevel 1 goto :err
 python -m pip install -r "%~dp0requirements.txt"
 if errorlevel 1 goto :err
 goto :deps_done
 :deps_skip
-echo [1/7] Dependencies: skipped  [flag -n]
+echo [1/6] Dependencies: skipped  [flag -n]
 :deps_done
 
-rem ---- [2/7] version resource ----
-echo [2/7] Generate version resource ...
+rem ---- [2/6] version resource ----
+echo [2/6] Generate version resource ...
 python make_version_file.py
 if errorlevel 1 goto :err
 
-rem ---- [3/7] mpv ----
-echo [3/7] Make sure mpv.exe exists ...
+rem ---- [3/6] mpv ----
+echo [3/6] Make sure mpv.exe exists ...
 if exist "%MPV%" goto :mpv_ok
 echo        mpv not found, installing via winget ...
 winget install -e --id shinchiro.mpv --accept-source-agreements --accept-package-agreements --silent
@@ -111,39 +155,39 @@ echo [ERROR] mpv.exe still missing. Install it first:  winget install shinchiro.
 goto :err
 :mpv_ok
 
-rem ---- [4/7] build ----
-echo [4/7] Building onedir package ... no extraction on launch
-if exist "%OUTDIR%" rmdir /s /q "%OUTDIR%"
-if exist "%ZIPFILE%" del /q "%ZIPFILE%"
 if not exist "%WORKDIR%" mkdir "%WORKDIR%"
 if not exist "%DISTDIR%" mkdir "%DISTDIR%"
-python -m PyInstaller --noconfirm --onedir --windowed ^
-  --name "%APPNAME%_%VER%" ^
-  --distpath "%DISTDIR%" ^
-  --workpath "%WORKDIR%" ^
-  --specpath "%WORKDIR%" ^
-  --version-file "%WORKDIR%\version_info.txt" ^
-  --exclude-module numpy --exclude-module PIL --exclude-module matplotlib ^
-  --exclude-module pandas --exclude-module scipy --exclude-module pytest ^
-  --exclude-module setuptools --exclude-module pip --exclude-module IPython ^
-  --add-data "%MPV%;_engine\mpv" ^
-  --add-data "%~dp0VERSION;." ^
-  "%ENTRY%"
+
+rem ---- [4/6] classic UI package ----
+if not defined DO_CLASSIC goto :skip_classic
+echo [4/6] Building classic ttk UI portable ZIP ... onedir, no extraction on launch
+set "BUILD_KIND=classic ttk UI"
+set "BUILD_STEM=%STEM_CLASSIC%"
+set "BUILD_ENTRY=%ENTRY_CLASSIC%"
+set "BUILD_EXCLUDE_PIL=1"
+call :build_dir_one
 if errorlevel 1 goto :err
+goto :skip_classic_done
+:skip_classic
+echo [4/6] Classic ttk UI: skipped
+:skip_classic_done
 
-rem ---- [5/7] license / notices ----
-echo [5/7] Copy LICENSE and THIRD_PARTY_NOTICES ...
-copy /Y "%~dp0LICENSE" "%OUTDIR%\" >nul 2>&1
-copy /Y "%~dp0THIRD_PARTY_NOTICES" "%OUTDIR%\THIRD_PARTY_NOTICES.txt" >nul 2>&1
+rem ---- [5/6] theme UI package ----
+if not defined DO_THEME goto :skip_theme
+echo [5/6] Building ttkbootstrap theme UI portable ZIP ... onedir, no extraction on launch
+set "BUILD_KIND=ttkbootstrap theme UI"
+set "BUILD_STEM=%STEM_THEME%"
+set "BUILD_ENTRY=%ENTRY_THEME%"
+set "BUILD_EXCLUDE_PIL="
+call :build_dir_one
+if errorlevel 1 goto :err
+goto :skip_theme_done
+:skip_theme
+echo [5/6] ttkbootstrap theme UI: skipped
+:skip_theme_done
 
-rem ---- [6/7] zip ----
-echo [6/7] Creating ZIP package ...
-python make_zip.py
-if errorlevel 1 goto :zipfail
-if not defined KEEP_CACHE rmdir /s /q "%OUTDIR%"
-
-rem ---- [7/7] cleanup ----
-echo [7/7] Cleanup
+rem ---- [6/6] cleanup ----
+echo [6/6] Cleanup
 call :clean_caches
 
 rem ---- report ----
@@ -153,20 +197,23 @@ set /a "ELAPSED=%T1% - %T0%" >nul 2>&1
 if not defined ELAPSED set "ELAPSED=0"
 set /a "EMIN=%ELAPSED% / 60" >nul 2>&1
 set /a "ESEC=%ELAPSED% %% 60" >nul 2>&1
-set "SIZE=?"
-for %%F in ("%ZIPFILE%") do set /a "SIZE=%%~zF / 1048576"
 echo.
-echo Done in %EMIN%m %ESEC%s :  %ZIPFILE%  [%SIZE% MB]
-echo A versioned portable ZIP with mpv embedded. Share it with Windows users.
+echo Done in %EMIN%m %ESEC%s
+if not defined DO_CLASSIC goto :rp_theme
+if not exist "%ZIP_CLASSIC%" goto :rp_theme
+set "SZ=?"
+for %%F in ("%ZIP_CLASSIC%") do set /a "SZ=%%~zF / 1048576"
+echo   %STEM_CLASSIC%.zip  [%SZ% MB]
+:rp_theme
+if not defined DO_THEME goto :rp_done
+if not exist "%ZIP_THEME%" goto :rp_done
+set "SZ=?"
+for %%F in ("%ZIP_THEME%") do set /a "SZ=%%~zF / 1048576"
+echo   %STEM_THEME%.zip  [%SZ% MB]
+:rp_done
+echo Portable ZIPs with mpv embedded. Share them with Windows users.
 endlocal
 exit /b 0
-
-:zipfail
-echo.
-echo ZIP creation FAILED. Kept the folder instead:  %OUTDIR%
-call :clean_caches
-endlocal
-exit /b 1
 
 :err
 echo.
@@ -174,6 +221,42 @@ echo Build FAILED. See messages above.
 call :clean_caches
 endlocal
 exit /b 1
+
+rem ---------------------------------------------------------------------------
+rem  build_dir_one -- package one front-end into a onedir folder, then ZIP it
+rem  in : BUILD_STEM, BUILD_ENTRY, BUILD_KIND, BUILD_EXCLUDE_PIL
+rem ---------------------------------------------------------------------------
+:build_dir_one
+set "BUILD_OUTDIR=%DISTDIR%\%BUILD_STEM%"
+set "BUILD_ZIP=%DISTDIR%\%BUILD_STEM%.zip"
+if exist "%BUILD_OUTDIR%" rmdir /s /q "%BUILD_OUTDIR%"
+if exist "%BUILD_ZIP%" del /q "%BUILD_ZIP%"
+set "PIL_OPT="
+if defined BUILD_EXCLUDE_PIL set "PIL_OPT=--exclude-module PIL"
+python -m PyInstaller --noconfirm --onedir --windowed ^
+  --name "%BUILD_STEM%" ^
+  --distpath "%DISTDIR%" ^
+  --workpath "%WORKDIR%" ^
+  --specpath "%WORKDIR%" ^
+  --version-file "%WORKDIR%\version_info.txt" ^
+  --exclude-module numpy --exclude-module matplotlib %PIL_OPT% ^
+  --exclude-module pandas --exclude-module scipy --exclude-module pytest ^
+  --exclude-module setuptools --exclude-module pip --exclude-module IPython ^
+  --add-data "%MPV%;_engine\mpv" ^
+  --add-data "%~dp0VERSION;." ^
+  "%BUILD_ENTRY%"
+if errorlevel 1 exit /b 1
+echo        ok: %BUILD_KIND% -^> "%BUILD_OUTDIR%"
+copy /Y "%~dp0LICENSE" "%BUILD_OUTDIR%\" >nul 2>&1
+copy /Y "%~dp0THIRD_PARTY_NOTICES" "%BUILD_OUTDIR%\THIRD_PARTY_NOTICES.txt" >nul 2>&1
+echo        creating ZIP ...
+python make_zip.py "%BUILD_STEM%"
+if errorlevel 1 (
+    echo        ZIP creation FAILED. Kept the folder instead: "%BUILD_OUTDIR%"
+    exit /b 1
+)
+if not defined KEEP_CACHE rmdir /s /q "%BUILD_OUTDIR%"
+exit /b 0
 
 rem ---------------------------------------------------------------------------
 rem  clean_caches -- drop PyInstaller scratch data and python bytecode caches
@@ -204,10 +287,15 @@ exit /b 0
 :usage
 echo Usage: %~nx0 [options]
 echo   -n, --no-deps      skip pip install / upgrade step  -- faster rebuilds
-echo   -k, --keep-cache   keep PyInstaller work dir and unpacked folder
+echo   -k, --keep-cache   keep PyInstaller work dir and unpacked folders
 echo   -d, --deep         also purge PyInstaller global cache and pip download cache
+echo   -c, --classic      build only dist\%APPNAME%_^<VERSION^>.zip
+echo   -t, --theme        build only dist\%APPNAME_THEME%_^<VERSION^>.zip
+echo   -a, --all          build both  [default]
 echo   -h, --help         show this help
 echo.
-echo Output: dist\%APPNAME%_^<VERSION^>.zip
+echo Note: the theme UI needs ttkbootstrap (and its PIL dependency), so PIL is
+echo       bundled for it and excluded only from the classic package.
+echo       Example: build_exe_dir.bat -n -t
 endlocal
 exit /b 0
