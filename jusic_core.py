@@ -17,6 +17,7 @@ jusic_core：Jusic 房间播放器共享核心库
 
 import asyncio
 import http.client
+import inspect
 import json
 import os
 import random
@@ -258,6 +259,55 @@ def ssl_context() -> ssl.SSLContext:
     except Exception:
         _ssl_ctx = make_ssl_context(False)
     return _ssl_ctx
+
+
+# --------------------------------------------------------------------------- #
+# websockets 版本适配（参数名与能力随版本变化，写死会直接连不上）
+# --------------------------------------------------------------------------- #
+_UA = "JusicRoomPlayer/1.0"
+_ws_extras = None
+
+
+def _loop_supports_proxy() -> bool:
+    """底层事件循环的 create_connection 是否支持 proxy 参数。
+
+    websockets 15 在没有原生 proxy 支持的解释器（如 Python 3.13）上会把
+    ``proxy=`` 原样透传给 ``loop.create_connection``，从而抛 TypeError。
+    """
+    try:
+        return "proxy" in inspect.signature(
+            asyncio.BaseEventLoop.create_connection).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def ws_connect_extras() -> dict:
+    """按当前 websockets 版本拼装 connect() 的可选参数。
+
+    * 请求头：websockets >= 14 用 ``additional_headers``，13.x 用 ``user_agent_header``
+      （老版本 ``extra_headers`` 会覆盖掉 websockets 自带的 UA，故优先专用参数）；
+    * ``proxy=None``（不代理、直连，绕开系统代理干扰）只在底层真正支持时才传，
+      否则在旧版 websockets 上会被透传给 loop.create_connection 而失败；
+      完全不支持代理的版本（13.x）本来就直连，无需该参数。
+    """
+    global _ws_extras
+    if _ws_extras is not None:
+        return dict(_ws_extras)
+    try:
+        params = inspect.signature(websockets.connect).parameters
+    except (TypeError, ValueError):
+        params = {}
+    extras = {}
+    if "additional_headers" in params:
+        extras["additional_headers"] = {"User-Agent": _UA}
+    elif "user_agent_header" in params:
+        extras["user_agent_header"] = _UA
+    elif "extra_headers" in params:
+        extras["extra_headers"] = {"User-Agent": _UA}
+    if "proxy" in params and _loop_supports_proxy():
+        extras["proxy"] = None
+    _ws_extras = dict(extras)
+    return dict(extras)
 
 
 # --------------------------------------------------------------------------- #
@@ -886,12 +936,11 @@ class RoomClient:
                 async with websockets.connect(
                     url,
                     ssl=ssl_context(),
-                    proxy=None,                     # 直连，绕开本机系统代理干扰
                     origin=UI_URL,
-                    additional_headers={"User-Agent": "JusicRoomPlayer/1.0"},
                     open_timeout=15,
                     ping_interval=30,
                     ping_timeout=12,
+                    **ws_connect_extras(),          # 版本/代理适配，见该函数说明
                 ) as ws:
                     retry = 0
                     self._ws = ws

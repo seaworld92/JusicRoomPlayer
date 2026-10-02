@@ -1,2 +1,9 @@
 # Jusic 轻量房间播放器依赖（仅实时通道需要）
-websockets==15.0.1
+# websockets：13.1 ~ 15.x 均可（jusic_core 内部按版本适配参数名与代理能力），
+#             16.0 及以上尚未验证（历史上有过兼容问题），故先限制在 <16。
+websockets>=13.1,<16
+
+# 主题界面版 jusic_gui_bootstrap.py 额外需要（经典界面 jusic_gui.py 不需要）：
+#   python -m pip install ttkbootstrap
+# 如需一并安装，可执行：  python -m pip install -r requirements.txt ttkbootstrap
+ttkbootstrap>=2.0

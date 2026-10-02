@@ -2,11 +2,13 @@
 
 一个**占用内存尽可能小**的开源方案 Python 音乐播放器，用来直接播放
 「一起听歌吧」房间点歌台（[Jusic-Serve-Houses](https://github.com/JumpAlang/Jusic-Serve-Houses)）里正在播放的歌曲，
-并支持**房间列表 / 进入房间 / 随时切换房间**。提供两个前端：
+并支持**房间列表 / 进入房间 / 随时切换房间**。提供三个前端：
 
 - `jusic_room_player.py`：命令行版（零 GUI，内存最小；含 `p` 搜歌 / `pick` 点歌命令）；
 - `jusic_gui.py`：基于 **ttk/Tkinter** 的图形界面版（房间列表双击进入、密码房询问、音量滑块、
-  **点歌面板**、歌词、队列与日志）。
+  **点歌面板**、歌词、队列与日志）；
+- `jusic_gui_bootstrap.py`：基于 **ttkbootstrap** 的**多主题界面版**（功能与上一版完全一致，
+  界面换成 Bootstrap 风格，**15 套风格 × 明/暗 = 30 种主题**可随时切换并自动记住）。
 
 - 网页版界面（数据来源）：<https://happy.alang.run/modern-ui/>
 - 播放器默认对接该网页使用的公开后端：`https://tx.alang.run/api`（可 `--host` 改成自建后端）
@@ -31,7 +33,7 @@
 ## 快速开始
 
 ```bat
-:: 1. 安装依赖（只需一个 websockets 库）
+:: 1. 安装依赖（websockets + 主题界面用的 ttkbootstrap）
 python -m pip install -r requirements.txt
 ```
 
@@ -43,8 +45,14 @@ python -m pip install -r requirements.txt
   python jusic_gui.py --console     :: 需要保留控制台调试输出时
   ```
 - **命令行版**：双击 `run.bat` 或运行 `python jusic_room_player.py`
+- **主题界面版（ttkbootstrap）**：双击 `jusic_gui_bootstrap.pyw`（或
+  `python jusic_gui_bootstrap.py`），界面右上角可随时切换主题：
+  ```bat
+  python jusic_gui_bootstrap.py --console                  :: 保留控制台调试输出
+  python jusic_gui_bootstrap.py --theme dracula-dark       :: 指定启动主题
+  ```
 
-两个版本都会自动进入默认房「一起听歌吧(DEFAULT)」，并跟随房间实时播放当前歌曲。
+三个版本都会自动进入默认房「一起听歌吧(DEFAULT)」，并跟随房间实时播放当前歌曲。
 
 ### 播放内核 mpv 准备
 
@@ -113,9 +121,32 @@ python jusic_room_player.py --mpv "C:\Program Files\MPV Player\mpv.exe"
   （Windows 11 若图标被折叠进溢出区，点任务栏右下角 `^` 即可看到，可拖出固定）；
 - 关闭窗口（点 ✕）即退出程序。
 
+### 主题界面版（jusic_gui_bootstrap.py）
+
+同一套功能，界面换成 ttkbootstrap 的 Bootstrap 风格，重点是**主题随便换**：
+
+- **主题切换**：右上角「主题」下拉框选风格（bootstrap / catppuccin / dracula /
+  everforest / gruvbox / minty / nord / one / pulse / pydata / sandstone /
+  solarized / tokyo-night / united / vapor，共 15 套），旁边的「深色」开关一键
+  切明/暗，二者组合就是 **30 种主题**；点「全部主题 ▾」可展开完整列表，里面还有
+  「明暗一键切换」和「随机换一个主题」；
+- **快捷键**：`Ctrl+T`（或 `F2`）明暗对调；
+- **记住设置**：主题与窗口大小写在 `%APPDATA%\JusicRoomPlayer\ui.json`，
+  下次启动自动恢复（想重置直接删掉该文件；也可用 `--theme` 临时指定）；
+- **深色适配**：歌词/日志文本、次要文字，以及分享/点歌/关于等弹窗的文字配色都会
+  随主题一起调整，暗色下同样清晰；
+- **播放进度条**：当前播放区多了带时间（`已播 / 总长`）的进度条，与歌词同一时钟；
+- **布局**：右侧把「歌词 / 点歌队列 / 动态日志（含聊天与昵称）」分成三个标签页，
+  左右分栏宽度可拖动；
+- 其余功能（房间列表与搜索、切歌投票、点歌、点赞、下载、分享二维码、系统托盘等）
+  与 `jusic_gui.py` 完全一致——代码上它是 `jusic_gui.JusicGui` 的子类，
+  **业务逻辑只有一份**，不会出现两套逻辑各自漂移。
+
+依赖：`ttkbootstrap`（`python -m pip install ttkbootstrap`，已写入 requirements.txt）。
+
 ### 命令行参数
 
-`jusic_room_player.py` 与 `jusic_gui.py` 均支持：
+`jusic_room_player.py`、`jusic_gui.py` 与 `jusic_gui_bootstrap.py` 均支持：
 
 ```text
 --host 域名        对接的 Jusic 后端（默认 tx.alang.run，支持自建实例）
@@ -123,6 +154,13 @@ python jusic_room_player.py --mpv "C:\Program Files\MPV Player\mpv.exe"
 --password 密码    房间密码
 --mpv 路径         mpv.exe 绝对路径
 --volume 0-100     播放音量（默认 90）
+```
+
+`jusic_gui_bootstrap.py`（主题界面版）额外支持：
+
+```text
+--theme 主题名     启动主题，如 dracula-dark / nord-light
+                   （默认使用上次记住的主题；可用 30 种，见 --theme 说明与界面「全部主题」）
 ```
 
 `jusic_room_player.py` 额外支持：

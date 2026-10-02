@@ -10,13 +10,15 @@
 - `jusic_core.py`：共享核心。含 RoomClient（后台 asyncio 线程 + listener(event,data) 回调）、MpvEngine、REST/WSS 协议、帧解析。**RoomClient._amain 必须设 self._loop = get_running_loop()**，否则线程安全请求被吞。
 - `jusic_room_player.py`：命令行前端；`jusic_gui.py`：ttk GUI 前端（需在 main 中 root.after 调度 _poll，GUI 线程桥=queue+after）。`jusic_gui.pyw` 自 2026-09-30 起是**薄启动器**（只 `from jusic_gui import main`），不再是全量副本——两份界面代码曾因副本漂移而缺功能。
 - GUI 功能：房间列表/搜索/切换、歌词 LRC 同步高亮、角落"关于·GPL-3.0"、**下载▾（保存当前歌曲音频 + .lrc 歌词，core.download_file 流式下载）**。
+- **主题界面版（2026-10-02 新增）**：`jusic_gui_bootstrap.py`（+ 薄启动器 `jusic_gui_bootstrap.pyw`）。用 **ttkbootstrap 2.2.3** 重做皮肤与布局：`class BootstrapGui(JusicGui)` **只覆写 `_build_ui/_sync_chat_text/_show_about/_on_close` 等 UI 层**，业务逻辑（房间/协议/点歌/点赞/歌词/下载/托盘）100% 继承 `jusic_gui.JusicGui`，因此不存在两份逻辑漂移。主题 = 15 风格 × 明/暗 = **30 种**（bootstrap/catppuccin/dracula/everforest/gruvbox/minty/nord/one/pulse/pydata/sandstone/solarized/tokyo-night/united/vapor）；右上角「风格下拉 + 深色开关 + 全部主题▾菜单（含明暗切换/随机主题）」，Ctrl+T / F2 一键明暗；主题与窗口尺寸存 `%APPDATA%\JusicRoomPlayer\ui.json`；新增播放进度条（复用 `_lyric_t0` 时钟）。README/THIRD_PARTY_NOTICES/requirements.txt 已同步（ttkbootstrap 为 MIT，只在主题界面版用到）。
+  - 深色适配要点：歌词/日志文本用 `ttb.Text`（AutoStyleMixin，跟随主题自动换色，但 **tag 颜色要自己重设**）；"次要文字"用注册表 `_muted_widgets` + 明暗两色（#6c757d / #9aa0a5）手动刷；父类对话框里硬编码的浅色（#555/#0a6/#333…）由 `_retint_dialog` 按 `_FG_MAP` 映射成主题色，**必须把识别到的"语义色名"记在 `_tint_keys`**，否则第二次切换时已变成主题色的控件认不出来。
 - **房间分享（2026-09-30）**：新增 `jusic_qr.py`（纯 Python 二维码：字节模式/等级 L-M-Q-H/自动版本 1-10/8 掩码按 ISO 4 规则择优/导出灰度 PNG，**零第三方依赖**）；`jusic_core` 增加 `SHARE_UI_URL`、`room_share_url()`、`get_mini_code()`；GUI「当前播放」面板加「分享房间…」→ 分享面板（复制链接/浏览器打开/保存二维码 PNG/微信小程序码/关闭），二维码用 tkinter Canvas 绘制（不依赖 Pillow）。
   - 官网分享链接格式：`https://happy.alang.run/modern-ui?houseId=<id>&housePwd=<pwd>`（前端仓库 JumpAlang/Jusic-ui 的 `roomShareUrl()`，密文一并带上；进房时读 location.search 自动入房）。官网二维码为 QrcodeVue size=210 level=H。
   - 小程序码接口：`POST /api/house/getMiniCode {"id":roomId}` → `data` 为 base64 JPEG。
 - **点歌（2026-09-30）**：core 有 `SONG_SOURCE_CODES`(网易/QQ/酷我/酷狗/咪咕 → wy/qq/kw/kg/mg)、`source_code()`、`song_unavailable()`、`song_album()`、`RoomClient.search_songs()`/`pick_song()`，`SEARCH` 帧 → `search` 事件 `{songs,total,page,ok}`；GUI「点歌…」面板（关键词+音源+搜索/热歌榜 `*热歌榜`+结果表+标准/高清+加载更多）。
   - 命令行版同源命令（2026-09-30）：`p 关键字` 搜歌、`pick 序号 [flac]`（别名 `点`）点歌、`pn` 加载更多、`ph` 热歌榜、`src [音源]` 切换音源，`--source` 启动参数；搜索用 `threading.Event` 同步等待（12s 超时），房间序号与歌曲序号靠 `pick` 前缀区分。
 - **音量即时生效（2026-09-20）**：每首 mpv 加 `--input-ipc-server=`（Win `\\.\pipe\jusic-mpv-<pid>-<seq>`，其它平台 tempdir 下 .sock），`MpvEngine.set_volume()` 只改值 + 唤醒常驻守护线程 `_pump_loop` 异步下发，GUI 永不阻塞；`_ipc_push` 必须**一次一连接**（写→读回执→关），因为同一 Windows 命名管道句柄上并发读写会永久阻塞。实测 ~0.02s 生效、300 次连发无失败。
-- `requirements.txt`（websockets==15.0.1）、`run.bat`、`run_gui.bat`、`README.md`。
+- `requirements.txt`（2026-10-02 改为 `websockets>=13.1,<16` + `ttkbootstrap>=2.0`）、`run.bat`、`run_gui.bat`、`README.md`。
 - 打包（2026-09-17 重写）：`build_exe.bat`=单文件 exe、`build_exe_dir.bat`=onedir+ZIP，均由 VERSION 取版本；开关 `-n` 跳过依赖、`-k` 保留缓存、`-d` 深度清缓存、`-h` 帮助。约定：`--distpath dist --workpath build --specpath build` + 入口绝对路径，**打包后自动清理 `build\` 工作目录与 `__pycache__`**，`.spec` 只生成在 `build\`（不再落仓库根）；不传 `--clean` 以复用 PyInstaller 全局分析缓存（重建仅 ~16–25s）。
 - 版本控制约定（2026-09-17）：新增 `.gitignore`，**`build/`、`dist/`、`*.spec` 不入库**（发布产物走 Release 附件）；`.codebuddy/memory/` 是有意跟踪的，勿忽略。
 - 发布流程（2026-09-18 新增 `publish_release.py`）：读 VERSION → 取 `dist\JusicRoomPlayer <ver>.exe` + `dist\JusicRoomPlayerPortable_<ver>.zip` → 在 GitHub/Gitee 建同名 tag 的 Release 并上传附件。纯标准库 urllib；凭证走环境变量 `GH_TOKEN`/`GITEE_TOKEN` 或 `--github-token/--gitee-token`；`git remote get-url` 自动解析 owner/repo（github=seaworld92/JusicRoomPlayer，origin=gitee seaworld/JusicRoomPlayer）；已存在 release/同名附件自动复用跳过（幂等）；`--dry-run` 无需凭证。**GitHub 会把附件名里的空格替换成点**（`JusicRoomPlayer 1.2.0.exe` → 远端 `JusicRoomPlayer.1.2.0.exe`）；Gitee API 的 `assets[].size` 恒为 0，不能用于校验。
@@ -33,12 +35,14 @@
 - **删除自己点的歌（2026-09-30 实测有效）**：`SEND /music/delete {id: <歌名>}`（官网传 `String(song.name || song.id)`，**传歌名有效、传数字 id 无效/q静默**）→ 回 `NOTICE`「删除成功」；跨会话或他人的歌静默无响应。可用于将来做「移除我点的歌」。
 
 ## 环境约定（Windows 本机，重要）
-- 目标服务器拒部分 TLS1.3 握手 → Python 固定 TLS1.2；websockets.connect(proxy=None) 绕本机系统代理 127.0.0.1:10808。
-- websockets 用 v15（additional_headers 参数；v17 有 bug）。
+- 目标服务器拒部分 TLS1.3 握手 → Python 固定 TLS1.2；`proxy=None` 用于绕开本机系统代理 127.0.0.1:10808。
+- **websockets 版本坑（2026-10-02 实测）**：本机 `python`（`C:\Users\love5\AppData\Local\Python\python3-13-14`）实际装的是 **websockets 13.1**（被同环境的 ocp-viewer-core 带装），而代码原来写死了 15.x 的 `additional_headers` 与 `proxy=None` → websockets 13 会把这两个未知参数**透传给 `loop.create_connection`**（该函数在 Python 3.13 既无 proxy 也无这两个参数），报 `TypeError: ... unexpected keyword argument 'proxy'`，WSS 完全连不上（两个 GUI + CLI 都受影响）。已在 `jusic_core.ws_connect_extras()` 做能力探测：14+ 用 `additional_headers`、13.x 用 `user_agent_header`、`proxy=None` 仅在 `BaseEventLoop.create_connection` 真有该参数时才传。requirements 放宽为 `>=13.1,<16`（v17 有 bug 的旧结论仍有效）。**以后改连接参数务必保持这种探测式写法。**
+- ttkbootstrap 2.x 关键 API（2026-10-02 实测，2.2.3）：**`ttb.Style()` 一旦创建就绑定当时的根窗口，之后再 `ttb.Window()` 会报 "single application root window"** → 启动前校验主题名只能用数据模块 `ttkbootstrap.themes.builtin.CURATED_THEMES`（15 个风格 Theme 对象的 `.name`）+ `themes.legacy.STANDARD_THEMES`，绝不能先 `ttb.Style()`。`Style.theme` 返回 **Theme 对象**（取名字用 `.theme.name`），明暗用 `style.theme_mode`；运行时 `style.theme_use(name)` 会自动重绘整棵控件树（`_theme_walk`），但**普通 tk 控件（tk.Text/tkMenu/tkToplevel）与显式写死的颜色不在其列** → 用 `ttb.Text`、`root.option_add("*Background"/"*Foreground", …)` 让后建对话框跟随主题。旧主题名（darkly/superhero…）仍可用但会发 DeprecationWarning。
 - 播放引擎 mpv 0.41.0 位于 `C:\Program Files\MPV Player\mpv.exe`（winget id shinchiro.mpv）。
 - 实测内存：命令行版 python≈37MB + mpv≈53MB ≈ 90MB；GUI 版（jusic_gui.py，2026-09-17 实测）python/tk≈55MB + mpv≈57MB ≈ 113MB。
 - PowerShell 命令含中文路径参数编码不可靠 → 用 ASCII 临时目录（如 %LOCALAPPDATA% 下）写 python runner，脚本内用 unicode 路径读写/测试。
 - 工作区是百度网盘同步盘：read_file 等工具对该盘某些文件可见性不稳；必要时用 python 直接读取确认。
 - tkinter 陷阱（2026-09-30）：`ttk.Entry(textvariable=var)` 里 var 若为**函数局部变量**，函数返回后它被 GC → 控件文本变空。需持有引用，或（推荐）直接 `insert` 文本后置为 readonly。
+- **ttk.Panedwindow 陷阱（2026-10-02）**：窗口还没映射完成时（paned 的 `winfo_width()` 仍是 1）调 `sashpos(0, N)` 会把分栏位置截成 0，**第一个窗格被压成 0 宽（内容 1x1，整个面板消失）**。必须等 `<Map>`/`<Configure>` 事件里 `winfo_ismapped()` 且宽度正常后再设，且只设一次（别再用 `after(120, ...)` 盲设）。排查这类“界面少了一块”的问题时，先打印各面板 `winfo_width/height`、`winfo_ismapped()` 与 `sashpos()`，别只看控件树里有没有数据。
 - 自研事物的验证套路（2026-09-30）：把参考库（如 segno）`pip install --target %TEMP%\<dir>` 临时安装做逐位对比，用后即删；二进制/图片类结果可借助在线服务（如 api.qrserver.com 的 read-qr-code）回读校验，再用 PIL ImageGrab 截图人工确认 GUI 效果。
 - 用户交流语言：简体中文。
