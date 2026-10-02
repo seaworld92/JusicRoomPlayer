@@ -31,3 +31,4 @@
 - `ttk.Panedwindow` 陷阱：窗口未映射时（`winfo_width()==1`）设 `sashpos` 会把首窗格压成 0 宽 → 等 `<Map>`/`<Configure>` 且 `winfo_ismapped()` 后只设一次。
 - `ttk.Treeview` 选中行配色：无颜色选项，需派生样式 + `style.configure(selectbackground/selectforeground)` **并且** `style.map(background/foreground=[("selected",…)])`，两者都设才在各主题稳定；`tkinter.ttk.Style(root)` 没有 `.colors`，取主题色要用 `ttkbootstrap.Style` 实例。
 - 验证套路：参考库 `pip install --target %TEMP%\<dir>` 做逐位对比，用后即删；图片结果用在线回读或 PIL ImageGrab 截图确认。工作区是百度网盘同步盘，工具可见性偶有不稳（必要时用 python 直读）；PowerShell 传中文路径不可靠 → 用 ASCII 临时目录 + python runner。
+- **长任务执行姿势（2026-10-02 实测）**：打包、60MB 级上传这类长命令若直接用工具跑，会被平台「转后台」且**进程可能中途消失、输出丢失**。可靠做法：`Start-Process -FilePath python -ArgumentList ... -RedirectStandardOutput <log> -RedirectStandardError <err> -PassThru`（工具调用秒回不被干扰）→ 之后轮询日志文件（等到 `完成。`/`ERROR`）＋用远端 API 复核结果。
