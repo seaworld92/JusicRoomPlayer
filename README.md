@@ -20,15 +20,60 @@
 2. **Python 只做“协议 + 控制”**：不引入 PyQt/WebView 等图形库，不装音频解码库，全部音频交给 mpv；
 3. **不复制网页逻辑**：直接走后端 REST + WSS 实时通道，比“开个浏览器/套壳网页”省几个数量级；
 4. **托盘也是系统原生的**：最小化驻留托盘由纯 `ctypes` 调用 Win32（`jusic_tray.py`）实现，
-   不引入 pystray / Pillow 等依赖，几乎不增加内存占用。
+   不引入 pystray / Pillow 等依赖，几乎不增加内存占用
+   （只有 `jusic_gui_bootstrap.py` 会因 ttkbootstrap 间接带入 Pillow，代价见下表）。
 
-| 实测（Windows，本机） | 占用内存 |
-|---|---|
-| Python 播放器进程 | ≈ 37 MB |
-| mpv 播放进程 | ≈ 53 MB |
-| **合计** | **≈ 90 MB** |
+实测（Windows 本机，**工作集**口径、播放中稳定态，可用 `tools/mem_bench.py`
+按下节方法复测）：
 
-> 浏览器运行该网页通常要 300 MB+；本方案约为其 1/4~1/3。
+| 前端 | Python 进程 | mpv 进程 | 合计 |
+|---|---|---|---|
+| `jusic_room_player.py`（命令行版） | ≈ 37 MB | ≈ 53 MB | **≈ 90 MB** |
+| `jusic_gui.py`（经典 ttk 界面） | ≈ 66 MB | ≈ 57 MB | **≈ 123 MB** |
+| `jusic_gui_bootstrap.py`（主题界面） | ≈ 76 MB | ≈ 57 MB | **≈ 134 MB** |
+
+> 浏览器运行该网页通常要 300 MB+；本方案约为其 1/4~1/2。
+>
+> 主题界面版比经典界面多约 **10 MB**（约 +15%），而这部分几乎全部来自
+> `ttkbootstrap` 自身：它一被导入就连带载入 Pillow（`import tkinter` 21 MB →
+> `import tkinter, ttkbootstrap` 34 MB，再建 `ttb.Window` 达 52 MB），
+> 我们自己的界面代码（`BootstrapGui` 继承 `JusicGui`，只替换布局）几乎不额外占内存。
+> 因此**追求极限内存请用 `jusic_gui.py`**，想要 30 种可切换主题则多花这 ~10 MB。
+
+## 内存基准测试（tools/mem_bench.py）
+
+想在本机自己复测一遍（脚本会自动弹窗、用 mpv 真的播一小会儿，属于正常现象）：
+
+```bat
+python tools/mem_bench.py                  :: 经典界面 + 主题界面（每项约 55s）
+python tools/mem_bench.py --cli            :: 再把命令行版也算上
+python tools/mem_bench.py --only theme --seconds 30      :: 只测主题界面，缩短时长
+python tools/mem_bench.py --imports-only   :: 只测库导入开销（不启动界面）
+python tools/mem_bench.py --json out.json  :: 结果另存 JSON，便于发版前后对比
+```
+
+测量口径与细节：
+
+- 内存取 Windows **工作集**（与任务管理器“内存”列同口径），同时给出提交大小与句柄数，
+  取稳定态 3 次采样的中位数；
+- 每个前端**单独串行**启动，命令为 `python <前端> --console`，并设 `JUSIC_GUI_PYW=1`，
+  避免程序自动改用 pythonw 重启而测到两个进程；
+- 分别在「界面刚建好」与「进入房间、播放稳定」两个阶段采样，体现真实使用时的占用；
+- mpv 是独立进程，用 `tasklist` 单独抓取，因此汇总表给出“播放器 + 内核”的合计；
+- 测量结束用 `taskkill /F /T` 连子进程（mpv）一起清干净（`--keep` 可保留窗口调试）。
+
+`--imports-only` 用于定位差距来源，本机结果（2026-10-02，Python 3.13 / ttkbootstrap 2.2.3）：
+
+| 场景 | 工作集 | 提交大小 |
+|---|---|---|
+| python 空进程基线 | 18 MB | 11 MB |
+| `import tkinter` | 21 MB | 12 MB |
+| `import tkinter, ttkbootstrap` | **34 MB**（连带载入 Pillow） | 23 MB |
+| 再创建 `ttb.Window()` | 52 MB | 32 MB |
+
+即：**主题界面的额外开销几乎全在 ttkbootstrap 这个库本身**。
+
+> 仅 Windows 可用（依赖 psapi / tasklist / taskkill）。
 
 ## 快速开始
 
@@ -232,14 +277,19 @@ build_exe_dir.bat
 ├─ jusic_room_player.py   # 命令行前端（复用 jusic_core）
 ├─ jusic_gui.py           # ttk/Tkinter 图形界面前端（复用 jusic_core）
 ├─ jusic_gui.pyw          # 无控制台双击启动器（仅调用 jusic_gui，避免两份界面代码不同步）
+├─ jusic_gui_bootstrap.py     # ttkbootstrap 多主题界面版（业务逻辑继承 jusic_gui.JusicGui）
+├─ jusic_gui_bootstrap.pyw    # 主题界面版的无控制台双击启动器
 ├─ jusic_tray.py          # 系统托盘（Windows，纯 ctypes 调 Win32，最小化驻留）
 ├─ jusic_qr.py            # 纯 Python 二维码生成（分享房间用，零第三方依赖）
-├─ requirements.txt       # 依赖：websockets
+├─ requirements.txt       # 依赖：websockets（+ 主题界面版所需的 ttkbootstrap）
 ├─ run.bat                # 命令行版一键启动
 ├─ run_gui.bat            # GUI（带控制台输出）备用启动
 ├─ VERSION               # 版本号来源（如 1.0.0），打包产物名/属性自动使用
 ├─ make_version_file.py  # 由 VERSION 生成 exe 版本资源（build 用）
 ├─ make_zip.py           # 把便携版目录压成同版本 ZIP（build 用）
+├─ publish_release.py    # 把 dist 产物发布到 GitHub / Gitee Releases（自动写 SHA256 与变更）
+├─ tools\
+│  └─ mem_bench.py       # 内存基准测试（对比各前端实际占用，仅 Windows）
 ├─ build_exe.bat          # 打包【单文件】exe（内置 mpv，带版本）→ dist\JusicRoomPlayer <版本>.exe
 ├─ build_exe_dir.bat      # 打包【便携版 ZIP】（内置 mpv，带版本）→ dist\JusicRoomPlayerPortable_<版本>.zip
 ├─ dist\JusicRoomPlayer <版本>.exe         # 单文件发行版（约 62MB）

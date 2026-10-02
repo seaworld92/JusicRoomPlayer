@@ -22,6 +22,7 @@
 - 打包（2026-09-17 重写）：`build_exe.bat`=单文件 exe、`build_exe_dir.bat`=onedir+ZIP，均由 VERSION 取版本；开关 `-n` 跳过依赖、`-k` 保留缓存、`-d` 深度清缓存、`-h` 帮助。约定：`--distpath dist --workpath build --specpath build` + 入口绝对路径，**打包后自动清理 `build\` 工作目录与 `__pycache__`**，`.spec` 只生成在 `build\`（不再落仓库根）；不传 `--clean` 以复用 PyInstaller 全局分析缓存（重建仅 ~16–25s）。
 - 版本控制约定（2026-09-17）：新增 `.gitignore`，**`build/`、`dist/`、`*.spec` 不入库**（发布产物走 Release 附件）；`.codebuddy/memory/` 是有意跟踪的，勿忽略。
 - 发布流程（2026-09-18 新增 `publish_release.py`）：读 VERSION → 取 `dist\JusicRoomPlayer <ver>.exe` + `dist\JusicRoomPlayerPortable_<ver>.zip` → 在 GitHub/Gitee 建同名 tag 的 Release 并上传附件。纯标准库 urllib；凭证走环境变量 `GH_TOKEN`/`GITEE_TOKEN` 或 `--github-token/--gitee-token`；`git remote get-url` 自动解析 owner/repo（github=seaworld92/JusicRoomPlayer，origin=gitee seaworld/JusicRoomPlayer）；已存在 release/同名附件自动复用跳过（幂等）；`--dry-run` 无需凭证。**GitHub 会把附件名里的空格替换成点**（`JusicRoomPlayer 1.2.0.exe` → 远端 `JusicRoomPlayer.1.2.0.exe`）；Gitee API 的 `assets[].size` 恒为 0，不能用于校验。
+- 内存基准工具（2026-10-02）：**`tools/mem_bench.py`**（入库的唯一测试工具，仅 Windows，纯标准库 psapi/tasklist/taskkill）——默认串行实测 `jusic_gui.py` 与 `jusic_gui_bootstrap.py`，`--cli` 加命令行版，`--imports-only` 只测库导入，`--json` 存结果；口径=工作集、`--console`+`JUSIC_GUI_PYW=1` 防 pythonw 重启、早期/稳定态各采 3 次取中位数、mpv 单独用 tasklist 抓、结束 `taskkill /F /T` 清场。README 已有「内存基准测试」章节与三前端对比表。
 - 平台适配现状（2026-09-18 确认）：**仅 Windows 完整可用**。`jusic_tray.py` 的托盘（Shell_NotifyIconW/CreateIconFromResourceEx）是 Win32 专属，非 Windows 下 `IS_WINDOWS=False` → 占位 `TrayIcon.available()=False`，GUI 自动退化为普通最小化（窗口留在任务栏，不会藏窗口）；但**图标字节生成 `icon_image_bytes()` 是纯 Python 计算（math/struct），任何系统都能生成同样 4264 字节**。`MpvEngine.find_mpv` 路径偏 Windows（Program Files/WinGet，Linux 靠 PATH）、`run.bat` 仅 Windows。真正跨平台托盘需分平台实现或引入 pystray+Pillow，与低内存定位冲突，暂未做。
 
 ## 关键协议事实（勿忘）
@@ -39,7 +40,12 @@
 - **websockets 版本坑（2026-10-02 实测）**：本机 `python`（`C:\Users\love5\AppData\Local\Python\python3-13-14`）实际装的是 **websockets 13.1**（被同环境的 ocp-viewer-core 带装），而代码原来写死了 15.x 的 `additional_headers` 与 `proxy=None` → websockets 13 会把这两个未知参数**透传给 `loop.create_connection`**（该函数在 Python 3.13 既无 proxy 也无这两个参数），报 `TypeError: ... unexpected keyword argument 'proxy'`，WSS 完全连不上（两个 GUI + CLI 都受影响）。已在 `jusic_core.ws_connect_extras()` 做能力探测：14+ 用 `additional_headers`、13.x 用 `user_agent_header`、`proxy=None` 仅在 `BaseEventLoop.create_connection` 真有该参数时才传。requirements 放宽为 `>=13.1,<16`（v17 有 bug 的旧结论仍有效）。**以后改连接参数务必保持这种探测式写法。**
 - ttkbootstrap 2.x 关键 API（2026-10-02 实测，2.2.3）：**`ttb.Style()` 一旦创建就绑定当时的根窗口，之后再 `ttb.Window()` 会报 "single application root window"** → 启动前校验主题名只能用数据模块 `ttkbootstrap.themes.builtin.CURATED_THEMES`（15 个风格 Theme 对象的 `.name`）+ `themes.legacy.STANDARD_THEMES`，绝不能先 `ttb.Style()`。`Style.theme` 返回 **Theme 对象**（取名字用 `.theme.name`），明暗用 `style.theme_mode`；运行时 `style.theme_use(name)` 会自动重绘整棵控件树（`_theme_walk`），但**普通 tk 控件（tk.Text/tkMenu/tkToplevel）与显式写死的颜色不在其列** → 用 `ttb.Text`、`root.option_add("*Background"/"*Foreground", …)` 让后建对话框跟随主题。旧主题名（darkly/superhero…）仍可用但会发 DeprecationWarning。
 - 播放引擎 mpv 0.41.0 位于 `C:\Program Files\MPV Player\mpv.exe`（winget id shinchiro.mpv）。
-- 实测内存：命令行版 python≈37MB + mpv≈53MB ≈ 90MB；GUI 版（jusic_gui.py，2026-09-17 实测）python/tk≈55MB + mpv≈57MB ≈ 113MB。
+- 实测内存（**2026-10-02 复测**，Windows 本机，取任务管理器口径的工作集）：
+  - 经典界面 `jusic_gui.py`：python/tk ≈ **66 MB**（提交 40 MB，句柄 ~310）+ mpv ≈ **57 MB** ⇒ 合计 ≈ **123 MB**；
+  - 主题界面 `jusic_gui_bootstrap.py`（ttkbootstrap）：python ≈ **76 MB**（提交 49 MB）+ mpv ≈ 57 MB ⇒ 合计 ≈ **134 MB**；
+  - 差距 ≈ **+10 MB**（约 +16%），根因是 ttkbootstrap 固定开销：单独 `import tkinter` 21 MB → `import ttkbootstrap` **34 MB**（+12.7 MB，**会连带载入 Pillow**），创建 `ttb.Window` 后 52 MB；python 空进程基线 18 MB。
+  - 命令行版 37 MB + mpv 53 MB ≈ 90 MB（2026-09-17 旧数据，未复测）；GUI 版 2026-09-17 曾为 113 MB，此后因新增点歌/点赞/分享/进度条等升到 123 MB。
+  - 结论：追极致低内存用 `jusic_gui.py`；主题界面多花约 10 MB（含 mpv 后差约 8%），性价比可接受。
 - PowerShell 命令含中文路径参数编码不可靠 → 用 ASCII 临时目录（如 %LOCALAPPDATA% 下）写 python runner，脚本内用 unicode 路径读写/测试。
 - 工作区是百度网盘同步盘：read_file 等工具对该盘某些文件可见性不稳；必要时用 python 直接读取确认。
 - tkinter 陷阱（2026-09-30）：`ttk.Entry(textvariable=var)` 里 var 若为**函数局部变量**，函数返回后它被 GC → 控件文本变空。需持有引用，或（推荐）直接 `insert` 文本后置为 readonly。
