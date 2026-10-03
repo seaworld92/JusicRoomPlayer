@@ -19,7 +19,9 @@ Jusic 房间播放器 · 主题界面版（ttkbootstrap）
   浅色文字，都会随主题重新着色，暗色下同样清晰；
 * **我的收藏**：与网页端同款（只存本机，JSON 可与网页端互相导入），
   在「♥ 我的收藏」标签页里管理；收藏逻辑同样继承自 ``jusic_gui.JusicGui``，
-  本文件只提供标签页界面。
+  本文件只提供标签页界面；
+* **在线人员**：「在线人员…」按钮或「👥 在线人员」标签页可查询房间在线成员
+  （昵称 / 身份 / 会话 ID / 加入时间，本人带 ★ 标记），切到该标签页会自动刷新一次。
 
 运行
 ----
@@ -328,9 +330,24 @@ class BootstrapGui(JusicGui):
         nb.add(self._build_lyric_page(nb), text="  ♪ 歌词  ")
         nb.add(self._build_queue_page(nb), text="  🎵 点歌队列  ")
         nb.add(self._build_favorites_page(nb), text="  ♥ 我的收藏  ")
+        nb.add(self._build_members_page(nb), text="  👥 在线人员  ")
         nb.add(self._build_log_page(nb), text="  📋 动态日志  ")
         self._notebook = nb
+        # 切到「在线人员」标签页时自动刷新一次（与网页端打开面板即拉取一致）
+        nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
         return right
+
+    def _on_tab_changed(self, event=None):
+        """切到「在线人员」标签页时自动查询一次成员列表。"""
+        page = getattr(self, "_members_page", None)
+        if page is None:
+            return
+        try:
+            if str(self._notebook.select()) != str(page):
+                return
+        except Exception:
+            return
+        self._request_members(quiet=True)
 
     def _build_now_playing(self, parent):
         info = ttb.Labelframe(parent, text=" 当前播放 ", padding=10, bootstyle="primary")
@@ -357,7 +374,7 @@ class BootstrapGui(JusicGui):
 
         act = ttb.Frame(info)
         act.grid(row=3, column=0, sticky="ew", pady=(10, 0))
-        act.columnconfigure(3, weight=1)
+        act.columnconfigure(4, weight=1)
         ttb.Button(act, text="切歌（投票）", bootstyle="warning",
                    command=self._skip_vote).grid(row=0, column=0, sticky="w")
         ttb.Button(act, text="点歌…", bootstyle="primary",
@@ -370,8 +387,11 @@ class BootstrapGui(JusicGui):
             row=0, column=3, sticky="w", padx=(6, 0))
         ttb.Button(act, text="分享房间…", bootstyle="info-outline",
                    command=self._share_room).grid(row=0, column=4, sticky="e")
+        ttb.Button(act, text="在线人员…", bootstyle="info-outline",
+                   command=self._open_members_dialog).grid(
+            row=1, column=0, sticky="w", pady=(4, 0))
         self._muted(act, text="普通成员投票，票数达标自动切歌", font=(FONT, 8)).grid(
-            row=1, column=0, columnspan=5, sticky="w", pady=(2, 0))
+            row=1, column=1, columnspan=4, sticky="w", padx=(6, 0), pady=(4, 0))
 
         vol_row = ttb.Frame(info)
         vol_row.grid(row=4, column=0, sticky="ew", pady=(10, 0))
@@ -495,6 +515,44 @@ class BootstrapGui(JusicGui):
 
         self._fav_page = page
         self._render_favorites()
+        return page
+
+    def _build_members_page(self, parent):
+        """「在线人员」标签页（网页端「在线成员」面板同款：查询房间在线成员）。"""
+        page = ttb.Frame(parent, padding=8)
+        page.columnconfigure(0, weight=1)
+        page.rowconfigure(1, weight=1)
+
+        bar = ttb.Frame(page)
+        bar.grid(row=0, column=0, columnspan=2, sticky="ew")
+        bar.columnconfigure(1, weight=1)
+        ttb.Button(bar, text="刷新成员", bootstyle="info-outline",
+                   command=self._request_members).grid(row=0, column=0, sticky="w")
+        self._members_count_var = tk.StringVar(value=f"共 {len(self._members)} 位成员")
+        self._muted(bar, textvariable=self._members_count_var, font=(FONT, 9)).grid(
+            row=0, column=2, sticky="e")
+
+        cols = ("n", "r", "s", "j")
+        self.members_tree = ttb.Treeview(page, columns=cols, show="headings",
+                                         height=10, bootstyle="info")
+        for key, text, width, anchor in (("n", "昵称", 250, "w"),
+                                         ("r", "身份", 90, "center"),
+                                         ("s", "会话 ID", 110, "center"),
+                                         ("j", "加入时间", 96, "center")):
+            self.members_tree.heading(key, text=text)
+            self.members_tree.column(key, width=width, anchor=anchor)
+        vs = ttb.Scrollbar(page, orient="vertical", command=self.members_tree.yview)
+        self.members_tree.configure(yscrollcommand=vs.set)
+        self.members_tree.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+        vs.grid(row=1, column=1, sticky="ns", pady=(8, 0))
+
+        self._members_status_var = tk.StringVar(
+            value="切到本标签页会自动查询；也可点「刷新成员」（本人带 ★ 标记）")
+        self._muted(page, textvariable=self._members_status_var, font=(FONT, 8)).grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+        self._members_page = page
+        self._render_members()
         return page
 
     def _build_log_page(self, parent):
@@ -803,6 +861,19 @@ class BootstrapGui(JusicGui):
             self._notebook.select(self._fav_page)
         except Exception:
             pass
+
+    def _open_members_dialog(self):
+        """主题界面不另开窗口：直接切到「在线人员」标签页（切页会自动查询一次）。"""
+        try:
+            already = str(self._notebook.select()) == str(self._members_page)
+        except Exception:
+            already = False
+        try:
+            self._notebook.select(self._members_page)
+        except Exception:
+            return
+        if already:          # 已经在成员页时切标签不会触发事件，这里手动刷新一次
+            self._request_members(quiet=True)
 
     def _sync_chat_text(self):
         """「显示聊天」开关：ttkbootstrap 的开关自带状态显示，只需同步给核心层。"""

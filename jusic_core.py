@@ -57,6 +57,72 @@ SONG_SOURCE_CODES = {
 }
 SONG_QUALITIES = {"标准": "320k", "高清": "flac"}   # 网页端两个点歌按钮对应的音质
 
+# 在线成员（HOUSE_USER 帧）里的身份取值；未知取值原样显示
+MEMBER_ROLE_LABELS = {
+    "default": "普通成员",
+    "admin": "房管",
+    "root": "超级管理员",
+    "picker": "点歌人",
+    "voter": "切歌人",
+    "black": "已拉黑",
+}
+
+# 昵称清洗（与网页端 cleanNickname 一致）：服务端下发的 nickName 形如
+# 「昵称(113.117.*.*)」，需要去掉末尾的掩码 IP 才算真正的昵称。
+_NICK_IP = r"(?:\d{1,3}|\*)\.(?:\d{1,3}|\*)\.(?:\d{1,3}|\*)\.(?:\d{1,3}|\*)"
+_NICK_TAIL_STAR = re.compile(r"(?:\(\*\))+$")
+_NICK_TAIL_IP = re.compile(rf"(?:\({_NICK_IP}\))+$")
+_NICK_IP_ONLY = re.compile(rf"^{_NICK_IP}$")
+
+
+def clean_nickname(value) -> str:
+    """清洗昵称：去掉末尾的 ``(*)`` 与掩码 IP 后缀（同网页端 cleanNickname）。
+
+    若去掉后为空、或昵称本身就是掩码 IP（该用户没设昵称），返回空串。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = _NICK_TAIL_STAR.sub("", text).strip()
+    if text.lower() in ("null", "undefined", "anonymous"):
+        return ""
+    if _NICK_IP_ONLY.match(text):
+        return ""
+    return _NICK_TAIL_IP.sub("", text).strip()
+
+
+def member_display_name(member) -> str:
+    """成员显示名：昵称优先（去掉掩码 IP），未设昵称时回落到会话 ID（同网页端）。"""
+    member = member or {}
+    for key in ("nickName", "nickname", "userName", "name"):
+        name = clean_nickname(member.get(key))
+        if name:
+            return name
+    return str(member.get("sessionId") or "匿名用户")
+
+
+def member_role_label(member) -> str:
+    """成员身份的中文名（role：default/admin/root/picker/voter/black）。"""
+    member = member or {}
+    role = str(member.get("role") or "").strip()
+    if not role:
+        return MEMBER_ROLE_LABELS["default"]
+    return MEMBER_ROLE_LABELS.get(role.lower(), role)
+
+
+def member_joined_text(member) -> str:
+    """成员加入时间（joinedAt 为服务端毫秒时间戳），取本地时区。"""
+    try:
+        ts = float((member or {}).get("joinedAt") or 0) / 1000.0
+    except (TypeError, ValueError):
+        return "—"
+    if ts <= 0:
+        return "—"
+    try:
+        return time.strftime("%m-%d %H:%M", time.localtime(ts))
+    except (OSError, ValueError):
+        return "—"
+
 
 def source_code(label_or_code: str) -> str:
     """把音源显示名（如「网易」）转成接口用的代码（如 wy）；已是代码则原样返回。"""
@@ -636,6 +702,7 @@ class RoomClient:
       music       -> dict MUSIC(含 url/name/artist/lyric/duration/pictureUrl)
       queue       -> list[MUSIC]
       search      -> dict {songs: list, total: int, page: int}  点歌搜索结果
+      members     -> list[member]  在线成员（/house/houseuser 的应答）
       good-mode   -> bool  房间「点赞排序」是否开启
       online      -> int
       chat        -> dict  (仅 show_chat=True 时)
@@ -658,8 +725,12 @@ class RoomClient:
         self.room = None          # 当前房间 dict
         self.current = None       # 当前 MUSIC
         self.queue = []
+        self.members = []         # 最近一次查询到的在线成员（list[dict]）
         self.online = 0
         self.connected = False
+        # 本次 WSS 连接的会话 ID（就是连接 URL 里的随机段，服务端也按它标识我们；
+        # 用于在成员列表里认出「本人」，实测 HOUSE_USER 里的 sessionId 与之一致）
+        self.session_id = ""
         # 点歌搜索的最近一次请求上下文（结果帧里不带关键词，用于界面回填）
         self.search_keyword = ""
         self.search_source = "wy"
@@ -732,6 +803,16 @@ class RoomClient:
         body = json.dumps({"name": name, "sendTime": int(time.time() * 1000)},
                           ensure_ascii=False)
         self.command("/setting/name", body)
+        return True
+
+    def list_members(self):
+        """查询在线成员：SEND /house/houseuser {}（网页端「在线成员」面板同款）。
+
+        服务端回 HOUSE_USER 帧（data 为成员数组），经 listener 的 "members" 事件传出；
+        成员字段：houseId / sessionId / name / nickName / remoteAddress / role / joinedAt。
+        纯只读查询，不改变房间状态；进房后网页端也会自动查一次。
+        """
+        self.command("/house/houseuser", "{}")
         return True
 
     # ---------------- 点歌 ---------------- #
@@ -898,6 +979,7 @@ class RoomClient:
         with self._lock:
             self.current = None
             self.queue = []
+            self.members = []
             self.online = 0
             self.connected = False
             name = room_id
@@ -922,9 +1004,11 @@ class RoomClient:
         with self._lock:
             self.current = None
             self.queue = []
+            self.members = []
             self.online = 0
             self.connected = False
             self.room = None
+        self.session_id = ""
 
     async def _session_loop(self, room_id, password):
         retry = 0
@@ -944,6 +1028,7 @@ class RoomClient:
                 ) as ws:
                     retry = 0
                     self._ws = ws
+                    self.session_id = sess          # 供成员列表识别「本人」
                     try:
                         # 发送 STOMP CONNECT 以便后续能发送指令（投票切歌等）。
                         # SockJS websocket 要求把帧放进 JSON 数组发送。
@@ -1048,6 +1133,23 @@ class RoomClient:
             self.search_total = total
             self._emit("search", {"songs": songs, "total": total,
                                   "page": self.search_page, "ok": code_ok})
+
+        elif mtype == "HOUSE_USER":
+            # 在线成员列表（/house/houseuser 的应答）：data 为成员数组。
+            # 与网页端一致：非数组（含失败）一律视为空列表；有成员时用其数量校正在线人数。
+            members, raw = [], data
+            if isinstance(raw, dict):                 # 兼容 {data/list/users: [...]} 包装
+                for key in ("data", "list", "users", "members"):
+                    if isinstance(raw.get(key), list):
+                        raw = raw[key]
+                        break
+            if isinstance(raw, list):
+                members = [m for m in raw if isinstance(m, dict)]
+            with self._lock:
+                self.members = members
+                if members:
+                    self.online = len(members)
+            self._emit("members", members)
 
         elif mtype == "GOODMODEL":
             # 房间「点赞排序」开关：data 为 GOOD 表示已开启（与网页端判定一致）

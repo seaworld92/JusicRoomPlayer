@@ -154,6 +154,11 @@ affecting the current room. After a disconnect it reconnects automatically with 
   "我的收藏…" opens the favorites list, where you can **request a song (320k / FLAC)**, **unfavorite**, **▶ 播放全部 (play all — queues every favorite)**,
   **export / import JSON** and **clear**. This mirrors the web UI's "My Favorites": it is stored **locally only**
   (`%APPDATA%\JusicRoomPlayer\favorites.json`), never uploaded; the exported JSON matches the web UI's export format, so the two can import each other's files;
+- **在线人员… (Online members…)** button: queries the room's online members from the server (`SEND /house/houseuser`).
+  The list shows **nickname / role / session ID / join time**, and your own row is marked with **★ (本人)**;
+  click "刷新成员" (refresh) to query again. Same as the web UI's "Online members" panel: the server only sends the
+  nickname (with the trailing masked IP stripped) and the session ID, so identical nicknames are told apart by session ID;
+  roles are admin / root / picker / voter / regular member;
 - **点歌… (Request…)** button: searches the real catalog by title/artist (sources: NetEase / QQ / Kuwo / Kugou / Migu, same as the web UI);
   the result list shows "song / artist · album / duration", **clicking a row selects it** (the whole row is highlighted — the themed UI follows the
   current theme's primary color, the classic UI uses bright blue — and a `▶` mark appears before the title), then click "点歌 · 标准" to add it to the queue,
@@ -188,9 +193,10 @@ The same feature set with a ttkbootstrap Bootstrap-style skin; the highlight is 
 - **Dark-mode adaptation**: lyric/log text, secondary text, and the text colors of the share/request/about dialogs all
   follow the theme, staying legible in dark mode too;
 - **Playback progress bar**: the current-song area gains a progress bar with times (`elapsed / total`), driven by the same clock as the lyrics;
-- **Layout**: the right side splits "lyrics / request queue / ♥ My Favorites / live log (including chat and nickname)" into four tabs,
-  with a draggable splitter between the left and right panes; the "我的收藏…" button simply switches to that tab (no extra window);
-- All other features (room list and search, skip vote, song requests, likes, **My Favorites**, downloads, share QR codes, system tray, …)
+- **Layout**: the right side splits "lyrics / request queue / ♥ My Favorites / 👥 Online members / live log (including chat and nickname)"
+  into five tabs, with a draggable splitter between the left and right panes; the "我的收藏…" and "在线人员…" buttons simply switch
+  to those tabs (no extra window), and switching to the members tab refreshes the list automatically;
+- All other features (room list and search, skip vote, song requests, likes, **My Favorites**, **online members**, downloads, share QR codes, system tray, …)
   are identical to `jusic_gui.py` — in code it is a subclass of `jusic_gui.JusicGui`, so there is
   **only one copy of the business logic** and the two UIs cannot drift apart.
 
@@ -296,6 +302,12 @@ Both UIs share these traits:
    `%APPDATA%\JusicRoomPlayer\favorites.json` (same structure, newest first). Requesting a song only needs the
    **song id / source / title** recorded in the favorite, so an expired playback URL does not matter;
    the exported JSON is byte-compatible with the web UI's "My Favorites → Export", so files can be moved both ways.
+8. Online members: `SEND /house/houseuser {}` (empty JSON body) → a `HOUSE_USER` frame whose `data` is an array of
+   members like `{houseId, sessionId, name, nickName, remoteAddress, role, joinedAt}` (`joinedAt` is an epoch-ms timestamp).
+   The server appends the masked IP to `nickName` (e.g. `昵称(113.117.*.*)`); following the web UI's rule the client strips
+   that trailing `(masked IP)` for display and falls back to `sessionId` when there is no nickname. `role` is one of
+   `default/admin/root/picker/voter`. **The session segment in the connection URL is your own `sessionId`**, so the list can
+   mark you as 本人 (the web UI additionally falls back to a nickname comparison). Read-only: it never changes room state.
 
 ## Directory structure
 

@@ -23,6 +23,7 @@ Jusic 房间播放器 · 图形界面版 (ttk/tkinter)
     * 点「点歌…」可按歌名/歌手搜索各音源曲库并加入房间队列（标准 320k / 高清 FLAC）
     * 「♡ 收藏」把当前歌曲加入「我的收藏」；「我的收藏…」窗口可查看/点歌/播放全部/
       导出/导入/清空（与网页端「我的收藏」同款：只存本机，JSON 可与网页端互相导入）
+    * 点「在线人员…」可查询当前房间的在线成员（昵称/身份/会话 ID/加入时间，本人带 ★ 标记）
     * 点「分享房间…」可复制/打开直达链接，并生成二维码（手机扫码进房）
     * 最小化窗口时自动隐藏到系统托盘（后台继续播放）；双击托盘图标恢复窗口，
       右键托盘图标弹出菜单可“显示主界面 / 退出程序”；关闭窗口即退出
@@ -81,10 +82,12 @@ try:
     import jusic_qr                          # 纯 Python 二维码（分享房间用）
     from jusic_core import (DEFAULT_HOST, MUSIC_API, SONG_SOURCE_CODES, UI_URL,
                             RoomClient, MpvEngine, DownloadCancelled,
-                            download_file, get_mini_code, guess_audio_ext,
-                            human_seconds, lyric_index, parse_lyrics,
-                            room_share_url, sanitize_filename, song_album,
-                            song_unavailable, sort_rooms, source_code)
+                            clean_nickname, download_file, get_mini_code,
+                            guess_audio_ext, human_seconds, lyric_index,
+                            member_display_name, member_joined_text,
+                            member_role_label, parse_lyrics, room_share_url,
+                            sanitize_filename, song_album, song_unavailable,
+                            sort_rooms, source_code)
     try:
         from jusic_tray import TrayIcon      # 纯 ctypes 托盘（Windows）
     except Exception:                        # 缺失/不支持时退化为普通最小化
@@ -249,6 +252,16 @@ class JusicGui:
         self.fav_tree = None
         self.fav_btn = None           # 播放栏 ♥ 按钮
 
+        # 在线人员（SEND /house/houseuser）
+        self._members = []
+        self._member_by_iid = {}
+        self._members_win = None      # 经典界面「在线人员」窗口
+        self._members_page = None     # 主题界面「在线人员」标签页
+        self.members_tree = None
+        self._members_count_var = None
+        self._members_status_var = None
+        self._members_token = 0       # 请求序号：用于超时回调失效
+
         # 未显式指定 mpv 时，优先使用打进 exe 的内置 mpv
         mpv_path = args.mpv or bundled_mpv_path()
         self.client = RoomClient(host=args.host, volume=args.volume,
@@ -355,7 +368,7 @@ class JusicGui:
         ttk.Label(info, textvariable=self.online_var, foreground="#06a").grid(row=2, column=1, sticky="e", pady=(4, 0))
         act = ttk.Frame(info)
         act.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(6, 0))
-        act.columnconfigure(3, weight=1)
+        act.columnconfigure(4, weight=1)
         ttk.Button(act, text="切歌（投票）",
                    command=self._skip_vote).grid(row=0, column=0, sticky="w")
         ttk.Button(act, text="点歌…",
@@ -367,9 +380,11 @@ class JusicGui:
                    command=self._open_favorites_dialog).grid(row=0, column=3, sticky="w", padx=(6, 0))
         ttk.Button(act, text="分享房间…",
                    command=self._share_room).grid(row=0, column=4, sticky="e")
+        ttk.Button(act, text="在线人员…",
+                   command=self._open_members_dialog).grid(row=1, column=0, sticky="w", pady=(4, 0))
         ttk.Label(act, text="普通成员投票，票数达标自动切歌",
                   foreground="#888", font=(FONT, 8)).grid(
-            row=1, column=0, columnspan=5, sticky="w", pady=(2, 0))
+            row=1, column=1, columnspan=4, sticky="w", padx=(6, 0), pady=(4, 0))
 
         vol_row = ttk.Frame(right)
         vol_row.grid(row=1, column=0, sticky="ew", pady=(6, 0))
@@ -1358,6 +1373,209 @@ class JusicGui:
             row=5, column=0, sticky="w", pady=(6, 0))
         self._render_favorites()
 
+    # ---------------- 在线人员（网页端「在线成员」面板同款） ---------------- #
+    def _members_note(self, text, tag=None, log=True):
+        """在线人员相关提示：写入日志区（可选），并同步到界面状态栏（如已打开）。"""
+        if log:
+            self._log(text, tag)
+        var = getattr(self, "_members_status_var", None)
+        if var is not None:
+            try:
+                var.set(text)
+            except Exception:
+                pass
+
+    def _member_is_self(self, member) -> bool:
+        """是否为本人（与网页端 isCurrentMember 等价：会话 ID 优先，昵称兜底）。
+
+        实测 HOUSE_USER 里的 sessionId 与连接 URL 中的会话段一致，因此连接后
+        我们一定能认出自己；昵称兜底用于会话 ID 缺失的老后端。
+        """
+        member = member or {}
+        if member.get("me") is True or member.get("isMe") is True or member.get("self") is True:
+            return True
+        sid = str(getattr(self.client, "session_id", "") or "")
+        mine = str(member.get("sessionId") or member.get("userId") or "").strip()
+        if sid and mine and mine == sid:
+            return True
+        nick = ""
+        try:
+            nick = clean_nickname(self.nick_var.get())
+        except Exception:
+            nick = ""
+        if nick:
+            name = str(member.get("nickName") or member.get("nickname")
+                       or member.get("userName") or member.get("name") or "")
+            if clean_nickname(name) == nick:
+                return True
+        return False
+
+    def _request_members(self, quiet=False):
+        """查询在线人员（SEND /house/houseuser）。
+
+        quiet=True 时只更新状态栏、不写日志（用于切换到成员标签页等自动触发场景）。
+        """
+        if not self.client.connected:
+            self._members_note("尚未连接房间，无法查询在线人员",
+                               "warn" if not quiet else None, log=not quiet)
+            return False
+        self.client.list_members()
+        self._members_token += 1
+        token = self._members_token
+        self._members_note("正在查询在线人员…", "muted", log=not quiet)
+        try:
+            self.root.after(8000, lambda: self._members_timeout(token))
+        except Exception:
+            pass
+        return True
+
+    def _members_timeout(self, token):
+        if token != self._members_token:
+            return                       # 已有结果或又发起了新请求
+        self._members_note("查询在线人员超时：请重试，或检查房间连接是否正常", "warn")
+
+    def _on_members(self, data):
+        """核心层 "members" 事件：刷新成员列表，并顺带校正在线人数。"""
+        self._members_token += 1         # 让未触发的超时回调失效
+        self._members = list(data or [])
+        if self._members:
+            try:
+                self.online_var.set(f"在线 {len(self._members)} 人")
+            except Exception:
+                pass
+            self._members_note(f"在线人员 {len(self._members)} 位", "muted")
+        else:
+            self._members_note("没有获取到在线成员（可能刚重连，稍后再刷新）", "warn")
+        self._render_members()
+
+    def _render_members(self):
+        """重绘「在线人员」列表（经典界面在窗口里，主题界面在标签页里）。"""
+        count_var = getattr(self, "_members_count_var", None)
+        if count_var is not None:
+            try:
+                count_var.set(f"共 {len(self._members)} 位成员")
+            except Exception:
+                pass
+        win = getattr(self, "_members_win", None)
+        if win is not None:
+            try:
+                if win.winfo_exists():
+                    win.title(f"在线人员（{len(self._members)}）")
+            except Exception:
+                pass
+        tree = getattr(self, "members_tree", None)
+        if tree is None:
+            return
+        try:
+            if not tree.winfo_exists():
+                return
+        except Exception:
+            return
+        self._member_by_iid = {}
+        try:
+            tree.delete(*tree.get_children())
+        except Exception:
+            return
+        for i, member in enumerate(self._members):
+            iid = str(i)
+            self._member_by_iid[iid] = member
+            name = member_display_name(member)
+            if self._member_is_self(member):
+                name = f"★ {name}（本人）"
+            try:
+                tree.insert("", "end", iid=iid, values=(
+                    name[:34],
+                    member_role_label(member),
+                    str(member.get("sessionId") or "—"),
+                    member_joined_text(member),
+                ))
+            except Exception:
+                pass
+
+    def _close_members_dialog(self):
+        """关闭经典界面的「在线人员」窗口，并清掉对已销毁控件的引用。"""
+        win, self._members_win = getattr(self, "_members_win", None), None
+        self.members_tree = None
+        self._member_by_iid = {}
+        self._members_count_var = None
+        self._members_status_var = None
+        if win is not None:
+            try:
+                win.destroy()
+            except Exception:
+                pass
+
+    def _open_members_dialog(self):
+        """经典界面：打开「在线人员」窗口（主题界面覆写为切到成员标签页）。"""
+        win = getattr(self, "_members_win", None)
+        if win is not None and win.winfo_exists():
+            win.lift()
+            win.focus_force()
+            self._request_members()
+            return
+
+        win = tk.Toplevel(self.root)
+        self._members_win = win
+        win.title(f"在线人员（{len(self._members)}）")
+        win.transient(self.root)
+        win.minsize(520, 380)
+        win.geometry("640x460")
+        try:
+            self.root.update_idletasks()
+            win.geometry(f"+{self.root.winfo_rootx() + 150}+{self.root.winfo_rooty() + 90}")
+        except Exception:
+            pass
+        win.protocol("WM_DELETE_WINDOW", self._close_members_dialog)
+        win.bind("<Escape>", lambda e: self._close_members_dialog())
+
+        body = ttk.Frame(win, padding=8)
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(3, weight=1)
+
+        ttk.Label(body, text="在线人员", font=(FONT, 12, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(body, text="向服务端查询（/house/houseuser）当前房间的在线成员；"
+                             "服务端只下发昵称与掩码 IP，同昵称可用「会话 ID」区分。",
+                  foreground="#666", justify="left", wraplength=600).grid(
+            row=1, column=0, sticky="w", pady=(2, 6))
+
+        toolbar = ttk.Frame(body)
+        toolbar.grid(row=2, column=0, sticky="ew")
+        toolbar.columnconfigure(2, weight=1)
+        ttk.Button(toolbar, text="刷新成员",
+                   command=self._request_members).grid(row=0, column=0, sticky="w")
+        ttk.Button(toolbar, text="关闭", width=8,
+                   command=self._close_members_dialog).grid(row=0, column=1, padx=(6, 0))
+        self._members_count_var = tk.StringVar(value=f"共 {len(self._members)} 位成员")
+        ttk.Label(toolbar, textvariable=self._members_count_var, foreground="#555").grid(
+            row=0, column=2, sticky="e")
+
+        tree_box = ttk.Frame(body)
+        tree_box.grid(row=3, column=0, sticky="nsew", pady=(6, 0))
+        tree_box.rowconfigure(0, weight=1)
+        tree_box.columnconfigure(0, weight=1)
+        cols = ("n", "r", "s", "j")
+        self.members_tree = ttk.Treeview(tree_box, columns=cols, show="headings", height=12)
+        self.members_tree.heading("n", text="昵称")
+        self.members_tree.heading("r", text="身份")
+        self.members_tree.heading("s", text="会话 ID")
+        self.members_tree.heading("j", text="加入时间")
+        self.members_tree.column("n", width=250, anchor="w")
+        self.members_tree.column("r", width=90, anchor="center")
+        self.members_tree.column("s", width=110, anchor="center")
+        self.members_tree.column("j", width=96, anchor="center")
+        vs = ttk.Scrollbar(tree_box, orient="vertical", command=self.members_tree.yview)
+        self.members_tree.configure(yscrollcommand=vs.set)
+        self.members_tree.grid(row=0, column=0, sticky="nsew")
+        vs.grid(row=0, column=1, sticky="ns")
+
+        self._members_status_var = tk.StringVar(value="正在查询在线人员…")
+        ttk.Label(body, textvariable=self._members_status_var, foreground="#888",
+                  font=(FONT, 8), wraplength=600, justify="left").grid(
+            row=4, column=0, sticky="w", pady=(6, 0))
+        self._render_members()
+        self._request_members()
+
     # ---------------- 分享房间（链接 / 二维码 / 小程序码） ---------------- #
     def _share_room(self):
         """生成当前房间的分享链接与二维码（与网页端「分享房间」等价）。"""
@@ -1936,6 +2154,8 @@ class JusicGui:
             self._picked_ids.clear()      # 新房间：自己点过的歌也随之失效
             self._last_like = None
             self._render_queue()          # 同步清掉队列里的 👍 标记
+            self._members = []            # 新房间：旧的在线人员列表作废
+            self._render_members()
             # 通道完全就绪后，若已填写昵称则自动应用
             if info.get("ready") and self.nick_var.get().strip():
                 self.client.set_nickname(self.nick_var.get().strip())
@@ -1955,6 +2175,8 @@ class JusicGui:
             self._begin_lyrics(m.get("lyric") or "", m.get("duration"))
         elif event == "search":
             self._on_search_result(data or {})
+        elif event == "members":
+            self._on_members(data or [])
         elif event == "good-mode":
             self._log("房间点赞排序：" + ("已开启（点赞会调整播放顺序）" if data
                                           else "未开启（点赞不影响播放顺序）"), "muted")
