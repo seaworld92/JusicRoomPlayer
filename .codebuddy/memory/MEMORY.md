@@ -4,7 +4,7 @@
 - 路径 `d:\BaiduSyncdisk\编程\本地音乐播放器`；「一起听歌吧」Jusic 房间的**低内存** Python 播放器（工作区名「本地音乐播放器」）。播放 https://happy.alang.run/modern-ui/（后端 https://tx.alang.run/api，源自 JumpAlang/Jusic-Serve-Houses），支持房间列表与切换。
 - **许可证 GPL-3.0**（2026-09-03 用户确认）：LICENSE + THIRD_PARTY_NOTICES；源码头 `SPDX-License-Identifier: GPL-3.0-only` + `Copyright (C) 2026 The JusicRoomPlayer Authors`。上游 Jusic-Serve-Houses 亦为 GPL-3.0（README 曾误标 MIT，已修正）；mpv=LGPL2.1+/ISC，websockets=BSD-3，ttkbootstrap=MIT。
 - 交流语言：简体中文。平台现状：**仅 Windows 完整可用**。
-- **Git 约定（2026-10-03 用户明确）：本项目只提交、不推送。** AI 完成工作后 `git add -A` + `git commit`（中文提交信息，风格如「新增…」「版本 x.y.z」）即可，**不要执行 `git push` / 打 tag 或推送 tag**，推送由用户自己决定；发布 Release 也要等用户明确要求再做。
+- **Git 约定（2026-10-03 用户明确）：本项目只提交、不推送。** AI 完成工作后 `git add -A` + `git commit`（中文提交信息，风格如「新增…」「版本 x.y.z」）即可，**不要执行 `git push` / 打 tag 或推送 tag**，推送由用户自己决定。**唯一例外：用户明确说「走发布流程」**（如 2.0.0）——那时按老四步执行：改 `VERSION` → 两个 build 脚本（`-n`）→ 提交 → `git tag -a vX.Y.Z` → `git push origin master` + `git push origin refs/tags/vX.Y.Z` → `publish_release.py`（`origin` 的 pushurl 同时含 Gitee 与 GitHub，一次 push 覆盖两端）。
 
 ## 架构与产物
 - `jusic_core.py` 共享核心：RoomClient（后台 asyncio 线程 + `listener(event,data)` 回调；**`_amain` 必须设 `self._loop = get_running_loop()`**，否则线程安全请求被吞）、MpvEngine、REST/WSS 协议与帧解析。
