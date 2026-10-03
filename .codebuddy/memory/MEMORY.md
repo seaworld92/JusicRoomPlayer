@@ -20,6 +20,7 @@
 - 房间列表 `POST /api/house/search`（头 AccessToken，匿名可用）。实时 `WSS /api/server/000/<随机>/websocket?houseId&housePwd&connectType=enter`，纯监听收 MUSIC(含可直接播放 url)/PICK/ONLINE/CHAT/NOTICE/公告；**不要发非 sockjs 帧**（会被 1007 关闭），无需 STOMP。帧格式 `a["TYPE\nheaders\n\n{json}"]`。
 - 点歌：`SEND /music/search {name,source,pageIndex,pageSize,sendTime}` → `SEARCH` 帧（`data.data` 数组、`data.totalSize` 总数）；`SEND /music/pick {name,id,source,quality}`，quality=320k|flac → NOTICE「点歌成功」+ 新 PICK 队列。搜索结果字段：**无 `source`**（用当前音源回填），`fl`/`st` 在 `privilege` 子对象（fl==0 或 st<0 视为不可用），`album` 是**对象**（取 `.name`），有 `duration`(ms)/`picture_url`。
 - 点赞：`SEND /music/good/<歌曲id>`，body `{}`。服务端按「点歌归属表」匹配，**只认自己本会话点的歌**（他人/换会话 → NOTICE「点歌列表未发现此歌」）；点赞数不下发。`GOODMODEL` 帧 = 房间「点赞排序」开关，`ROOM_STATE` 含 `goodModel`。GUI 只保留队列点赞（收到失败提示自动撤回 👍，靠 `_last_like`/`_rollback_last_like`）。
+- **NOTICE 帧绝不能按 `code` 过滤（2026-10-03 修 Bug）**：失败提示是用**非 20000 码**下发的，实测点歌被拒回 `{"code":"40000","message":"进入房间满10分钟后才能点歌，还需等待约10分钟"}`（该房间 `pickWaitMinutes=10`）；官网 `notice-message` 也不判 code。原实现 `if code_ok and message` 把失败提示全丢了 → 界面“点了没反应”。现 GUI 用 `_track_pending_pick/_claim_pick_notice`（15 秒窗口，对齐官网 `pendingPicks`）把提示关联到点歌/收藏面板状态行 + 底部状态栏 + 日志。**排查“服务端有动作但界面没反应”类问题，先看是不是被 code/字段过滤掉了。**
 - 删除自己点的歌：`SEND /music/delete {id: <歌名>}`（**传歌名有效**，数字 id 无效）→ NOTICE「删除成功」；他人/跨会话静默。`/music/clear`、`/music/top {id}` 属房管权限。
 - 官网分享链接：`https://happy.alang.run/modern-ui?houseId=<id>&housePwd=<pwd>`；小程序码 `POST /api/house/getMiniCode {"id":roomId}` → base64 JPEG。
 

@@ -165,6 +165,9 @@ affecting the current room. After a disconnect it reconnects automatically with 
   or "点歌 · 高清" to request it in FLAC; there are also "热歌榜" (hot chart) and "加载更多" (load more) buttons;
   tracks without a playable version are marked "unavailable"; if the room forbids guest requests, the server pushes a notice;
   **double-clicking a result row does not request it** (to avoid accidental requests; select and confirm with the button instead);
+  **a rejected request is always reported**: the server's own wording (e.g. "进入房间满10分钟后才能点歌，还需等待约10分钟")
+  is written to the log, the bottom status bar and the request panel's status line (any server notice within 15 seconds of a
+  request is treated as that request's reply), so "clicked and nothing happened" can no longer occur;
 - **Chat input + send button** (Enter also works): sends text to the room chat; you can set a **nickname** first (the server default is used if empty);
 - **下载▾ (Download) menu** saves the currently playing **song audio**, the **lyrics (.lrc)**, or **both** (lyrics are saved as a `.lrc` file next to the audio with the same name);
 - **分享房间… (Share room…)** button: generates a **direct room link** identical to the web UI
@@ -308,6 +311,11 @@ Both UIs share these traits:
    that trailing `(masked IP)` for display and falls back to `sessionId` when there is no nickname. `role` is one of
    `default/admin/root/picker/voter`. **The session segment in the connection URL is your own `sessionId`**, so the list can
    mark you as 本人 (the web UI additionally falls back to a nickname comparison). Read-only: it never changes room state.
+9. Server notices (`NOTICE`): **never filter them by `code`**. Rejected song requests (room forbids requests / entry wait not
+   elapsed / no permission) arrive as **non-20000** notices — measured on that room:
+   `{"code":"40000","message":"进入房间满10分钟后才能点歌，还需等待约10分钟"}`. The web UI does not check the code for
+   `notice-message` either, so the client shows them verbatim: in the log, the bottom status bar, and (within 15 seconds of a
+   request, matching the web UI's `pendingPicks` window) the status line of the corresponding panel.
 
 ## Directory structure
 

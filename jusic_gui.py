@@ -21,6 +21,8 @@ Jusic 房间播放器 · 图形界面版 (ttk/tkinter)
     * 音量滑块即时生效（拖动过程中声音实时变化，无需等下一首）
     * 在点歌队列里选中某首后点「👍 点赞选中歌曲」点赞成功会显示点赞标记（👍 列）
     * 点「点歌…」可按歌名/歌手搜索各音源曲库并加入房间队列（标准 320k / 高清 FLAC）
+    * 点歌被拒时（房间禁止点歌 / 进房等待未满 / 无点歌权限等）会**把服务端的原话提示出来**：
+      日志区、底部状态栏与点歌面板状态行都会显示（官网同款提示，非 20000 码的通知也不会再被丢掉）
     * 「♡ 收藏」把当前歌曲加入「我的收藏」；「我的收藏…」窗口可查看/点歌/播放全部/
       导出/导入/清空（与网页端「我的收藏」同款：只存本机，JSON 可与网页端互相导入）
     * 点「在线人员…」可查询当前房间的在线成员（昵称/身份/会话 ID/加入时间，本人带 ★ 标记）
@@ -101,6 +103,10 @@ FONT = "Microsoft YaHei UI"
 PICK_TREE_STYLE = "Pick.Treeview"        # 点歌结果列表专用样式（选中行高对比底色）
 PICK_SEL_FALLBACK = "#0d6efd"            # 拿不到主题色时的选中底色（通用蓝）
 FAVORITES_FILE = "favorites.json"        # 我的收藏本地存档（网页端为 localStorage 的 collectMusic）
+PICK_WAIT_SECONDS = 15                   # 点歌请求的等待回执窗口（与网页端 pendingPicks 一致）
+# 服务端对点歌请求的应答（正常/失败）通常带这些字样，用于把 NOTICE 关联到刚发的点歌
+PICK_NOTICE_HINTS = ("点歌", "歌曲", "歌名", "权限", "禁止", "失败", "无法", "不可用",
+                     "不存在", "添加", "等待", "超时")
 
 
 def color_luminance(color: str) -> float:
@@ -261,6 +267,10 @@ class JusicGui:
         self._members_count_var = None
         self._members_status_var = None
         self._members_token = 0       # 请求序号：用于超时回调失效
+
+        # 刚发出、还在等服务端回执的点歌请求：[(歌名, 音质标签, time.monotonic)]
+        # 服务端的应答是 NOTICE 帧（可能是非 20000 的失败提示），用它提示到对应界面。
+        self._pick_pending = []
 
         # 未显式指定 mpv 时，优先使用打进 exe 的内置 mpv
         mpv_path = args.mpv or bundled_mpv_path()
@@ -917,9 +927,76 @@ class JusicGui:
         if ok:
             self._picked_ids.add(str(song.get("id")))     # 记为本会话自己点的歌
             self._log(f"点歌（{label}）：{name} - {artist}", "good")
-            self._pick_status_var.set(f"已发送点歌请求（{label}）：{name} - {artist}")
+            self._track_pending_pick(name, label)         # 等服务端回执（成功/失败）
+            self._pick_status_var.set(
+                f"已发送点歌请求（{label}）：{name} - {artist}（等待服务端确认…）")
         else:
             self._pick_status_var.set("点歌失败：歌曲 id 无效")
+
+    # ---------------- 服务端提示（NOTICE） ---------------- #
+    # 说明：点歌被拒（房间禁止点歌/进房等待未满/无点歌权限）时，服务端回的是
+    # **非 20000 码** 的 NOTICE，例如实测：{"code":"40000","message":"进入房间满10分钟后
+    # 才能点歌，还需等待约10分钟"}。核心层现在会把这类提示原样传出（不再按 code 过滤）。
+    def _on_notice(self, text):
+        """处理服务端 NOTICE：优先关联到刚发出的点歌请求，否则记为普通通知。"""
+        text = str(text or "").strip()
+        if not text:
+            return
+        if "未发现此歌" in text:
+            rolled = self._rollback_last_like()
+            self._log("[点赞] 未生效：该后端只接受「自己点的歌」点赞"
+                      "（点歌归属不匹配）" + ("，已撤回点赞标记" if rolled else ""), "warn")
+            return
+        if self._claim_pick_notice(text):
+            return                          # 已作为点歌回执提示到点歌/收藏界面
+        self._log(f"[通知] {text}", "warn")
+
+    def _track_pending_pick(self, name, label=""):
+        """记录一次刚发出的点歌请求，等待服务端回执（与网页端 pendingPicks 同思路）。"""
+        now = time.monotonic()
+        self._pick_pending = [p for p in getattr(self, "_pick_pending", [])
+                              if now - p[2] < PICK_WAIT_SECONDS]
+        self._pick_pending.append((str(name or ""), str(label or ""), now))
+
+    def _claim_pick_notice(self, text) -> bool:
+        """这条 NOTICE 是不是刚发出的点歌请求的应答？是则提示出来并返回 True。"""
+        now = time.monotonic()
+        pending = [p for p in getattr(self, "_pick_pending", [])
+                   if now - p[2] < PICK_WAIT_SECONDS]
+        self._pick_pending = pending
+        for entry in pending:
+            name, label, _at = entry
+            if (name and name in text) or any(h in text for h in PICK_NOTICE_HINTS):
+                self._pick_pending.remove(entry)
+                self._pick_result_note(text, "点歌成功" in text or "添加成功" in text,
+                                       name=name, label=label)
+                return True
+        return False
+
+    def _pick_result_note(self, text, ok, name="", label=""):
+        """把服务端对点歌的应答显示出来：日志 + 底部状态栏 + 点歌/收藏面板状态栏。"""
+        clean = str(text or "").strip()
+        for prefix in ("点歌成功", "点歌失败"):
+            if clean.startswith(prefix):
+                clean = clean[len(prefix):].lstrip("：: ")
+                break
+        msg = f"点歌{'成功' if ok else '失败'}" + (f"：{clean}" if clean else "")
+        if label:
+            msg += f"（{label}）"
+        self._log(msg, "good" if ok else "warn")
+        if not ok:
+            # 失败时也写到底部状态栏，避免用户没打开点歌面板时“看不到任何提示”
+            try:
+                self.status_var.set(msg)
+            except Exception:
+                pass
+        for attr in ("_pick_status_var", "_fav_status_var"):
+            var = getattr(self, attr, None)
+            if var is not None:
+                try:
+                    var.set(msg)
+                except Exception:
+                    pass
 
     # ---------------- 点歌队列渲染 / 点赞 ---------------- #
     def _render_queue(self):
@@ -1126,7 +1203,9 @@ class JusicGui:
             self._fav_note("点歌失败：歌曲 id 无效", "warn")
             return False
         self._picked_ids.add(key)              # 记为本会话自己点的歌（点赞需要）
-        self._fav_note(f"点歌（{label}）：{name} - {artist}".strip(" -"), "good")
+        self._track_pending_pick(name, label)  # 等服务端回执（成功/失败）
+        self._fav_note(f"点歌（{label}）：{name} - {artist}（等待服务端确认…）".strip(" -"),
+                       "good")
         return True
 
     def _favorite_pick_selected(self, quality="320k"):
@@ -2155,6 +2234,7 @@ class JusicGui:
             self._last_like = None
             self._render_queue()          # 同步清掉队列里的 👍 标记
             self._members = []            # 新房间：旧的在线人员列表作废
+            self._pick_pending = []       # 新房间：之前的点歌回执不再关联
             self._render_members()
             # 通道完全就绪后，若已填写昵称则自动应用
             if info.get("ready") and self.nick_var.get().strip():
@@ -2189,13 +2269,7 @@ class JusicGui:
             if self.chat_var.get():
                 self._log(f"[聊天] {data.get('name')}: {data.get('text')}", "muted")
         elif event == "notice":
-            text = str(data)
-            if "未发现此歌" in text:
-                rolled = self._rollback_last_like()
-                self._log("[点赞] 未生效：该后端只接受「自己点的歌」点赞"
-                          "（点歌归属不匹配）" + ("，已撤回点赞标记" if rolled else ""), "warn")
-            else:
-                self._log(f"[通知] {text}", "warn")
+            self._on_notice(data)
         elif event == "announce":
             self._log(f"[公告] {(data or {}).get('content', '')[:240]}", "warn")
         elif event == "dl-progress":

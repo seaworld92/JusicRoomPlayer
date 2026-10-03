@@ -706,7 +706,7 @@ class RoomClient:
       good-mode   -> bool  房间「点赞排序」是否开启
       online      -> int
       chat        -> dict  (仅 show_chat=True 时)
-      notice      -> str
+      notice      -> str  (服务端提示；**含非 20000 码的失败提示**，如点歌被拒/权限不足)
       announce    -> dict
       log         -> str  普通状态文本
       error       -> str  错误文本
@@ -1179,8 +1179,16 @@ class RoomClient:
                     self._emit("announce", {"content": ann, "nickName": data.get("nickName")})
 
         elif mtype == "NOTICE":
-            if code_ok and body.get("message"):
-                self._emit("notice", body.get("message"))
+            # 与网页端一致：**不能只看 code**。网页端对 notice-message 不做任何 code 判断，
+            # 而点歌被拒/权限不足/进房等待等失败提示都是用非 20000 的 NOTICE 下发的
+            # （实测该后端回 code=40000 + message「进入房间满10分钟后才能点歌…」），
+            # 只认 code 会把失败提示全部丢掉，界面就表现为“点了没反应、没有任何提示”。
+            text = body.get("message")
+            if not text and isinstance(data, str):
+                text = data                     # 个别后端把提示放在字符串 data 里
+            text = str(text or "").strip()
+            if text:
+                self._emit("notice", text)
 
         elif mtype == "CHAT" and self.show_chat and isinstance(data, dict):
             name = data.get("name") or data.get("nickName") or "?"
