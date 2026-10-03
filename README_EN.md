@@ -8,7 +8,7 @@ with support for **room listing / joining / switching at any time**. Three front
 
 - `jusic_room_player.py`: command-line frontend (no GUI, lowest memory; includes `p` search / `pick` request commands);
 - `jusic_gui.py`: **ttk/Tkinter** GUI (double-click a room to join, password prompt, volume slider,
-  **song-request panel**, lyrics, queue and log);
+  **song-request panel**, lyrics, queue, **My Favorites** and log);
 - `jusic_gui_bootstrap.py`: **ttkbootstrap** multi-theme GUI (identical features, Bootstrap-style skin,
   **15 styles × light/dark = 30 themes**, switchable at runtime and remembered automatically).
 
@@ -149,6 +149,11 @@ affecting the current room. After a disconnect it reconnects automatically with 
   **Note: this backend matches against the "request ownership table" and only accepts songs you requested yourself** — liking someone else's song triggers
   "点歌列表未发现此歌" from the server, in which case the UI **automatically retracts the 👍 mark** and explains why (it never shows a fake liked state);
   if the room enables "sort by likes", liking changes playback order (the queue refreshes automatically);
+- **My Favorites (♡ 收藏)**: click "♡ 收藏" to favorite the **currently playing song** (click again to unfavorite); favorited rows show ♥ in a dedicated
+  **"收藏" (Favorite) column** in the queue (there is also a "♡ 收藏选中歌曲" button below the queue).
+  "我的收藏…" opens the favorites list, where you can **request a song (320k / FLAC)**, **unfavorite**, **▶ 播放全部 (play all — queues every favorite)**,
+  **export / import JSON** and **clear**. This mirrors the web UI's "My Favorites": it is stored **locally only**
+  (`%APPDATA%\JusicRoomPlayer\favorites.json`), never uploaded; the exported JSON matches the web UI's export format, so the two can import each other's files;
 - **点歌… (Request…)** button: searches the real catalog by title/artist (sources: NetEase / QQ / Kuwo / Kugou / Migu, same as the web UI);
   the result list shows "song / artist · album / duration", **clicking a row selects it** (the whole row is highlighted — the themed UI follows the
   current theme's primary color, the classic UI uses bright blue — and a `▶` mark appears before the title), then click "点歌 · 标准" to add it to the queue,
@@ -183,9 +188,9 @@ The same feature set with a ttkbootstrap Bootstrap-style skin; the highlight is 
 - **Dark-mode adaptation**: lyric/log text, secondary text, and the text colors of the share/request/about dialogs all
   follow the theme, staying legible in dark mode too;
 - **Playback progress bar**: the current-song area gains a progress bar with times (`elapsed / total`), driven by the same clock as the lyrics;
-- **Layout**: the right side splits "lyrics / request queue / live log (including chat and nickname)" into three tabs,
-  with a draggable splitter between the left and right panes;
-- All other features (room list and search, skip vote, song requests, likes, downloads, share QR codes, system tray, …)
+- **Layout**: the right side splits "lyrics / request queue / ♥ My Favorites / live log (including chat and nickname)" into four tabs,
+  with a draggable splitter between the left and right panes; the "我的收藏…" button simply switches to that tab (no extra window);
+- All other features (room list and search, skip vote, song requests, likes, **My Favorites**, downloads, share QR codes, system tray, …)
   are identical to `jusic_gui.py` — in code it is a subclass of `jusic_gui.JusicGui`, so there is
   **only one copy of the business logic** and the two UIs cannot drift apart.
 
@@ -286,6 +291,11 @@ Both UIs share these traits:
 6. Likes: `SEND /music/good/<songId>` with body `{}`. Measured behavior: this backend matches against the "request ownership table" and **only accepts songs you requested yourself** —
    someone else's song immediately returns `NOTICE` "点歌列表未发现此歌", while your own song is accepted silently (if the room enables "sort by likes" it affects playback order).
    Like counts are not pushed to clients (the `MUSIC` frame has no counter field), so the client only sends, deduplicates, and displays server messages verbatim.
+7. Favorites (My Favorites) are **purely local and use no server API at all**: the web UI stores them in the browser's
+   `localStorage` under `collectMusic` (`{songId: song}`), while this program stores them in
+   `%APPDATA%\JusicRoomPlayer\favorites.json` (same structure, newest first). Requesting a song only needs the
+   **song id / source / title** recorded in the favorite, so an expired playback URL does not matter;
+   the exported JSON is byte-compatible with the web UI's "My Favorites → Export", so files can be moved both ways.
 
 ## Directory structure
 

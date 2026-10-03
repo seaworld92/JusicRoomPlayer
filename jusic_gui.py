@@ -21,6 +21,8 @@ Jusic 房间播放器 · 图形界面版 (ttk/tkinter)
     * 音量滑块即时生效（拖动过程中声音实时变化，无需等下一首）
     * 在点歌队列里选中某首后点「👍 点赞选中歌曲」点赞成功会显示点赞标记（👍 列）
     * 点「点歌…」可按歌名/歌手搜索各音源曲库并加入房间队列（标准 320k / 高清 FLAC）
+    * 「♡ 收藏」把当前歌曲加入「我的收藏」；「我的收藏…」窗口可查看/点歌/播放全部/
+      导出/导入/清空（与网页端「我的收藏」同款：只存本机，JSON 可与网页端互相导入）
     * 点「分享房间…」可复制/打开直达链接，并生成二维码（手机扫码进房）
     * 最小化窗口时自动隐藏到系统托盘（后台继续播放）；双击托盘图标恢复窗口，
       右键托盘图标弹出菜单可“显示主界面 / 退出程序”；关闭窗口即退出
@@ -28,6 +30,7 @@ Jusic 房间播放器 · 图形界面版 (ttk/tkinter)
 
 import argparse
 import base64
+import json
 import os
 import queue
 import subprocess
@@ -94,6 +97,7 @@ except (ImportError, SystemExit) as exc:
 FONT = "Microsoft YaHei UI"
 PICK_TREE_STYLE = "Pick.Treeview"        # 点歌结果列表专用样式（选中行高对比底色）
 PICK_SEL_FALLBACK = "#0d6efd"            # 拿不到主题色时的选中底色（通用蓝）
+FAVORITES_FILE = "favorites.json"        # 我的收藏本地存档（网页端为 localStorage 的 collectMusic）
 
 
 def color_luminance(color: str) -> float:
@@ -137,6 +141,68 @@ def pick_selection_colors(root, style=None) -> tuple:
     return base, contrast_text_color(base)
 
 
+# ===================================================================== #
+# 我的收藏：本地存档（对照网页端 localStorage 里的 collectMusic）
+# ===================================================================== #
+def favorites_store_path() -> str:
+    """收藏存档路径（%APPDATA%/JusicRoomPlayer/favorites.json，与界面配置同目录）。"""
+    base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "JusicRoomPlayer", FAVORITES_FILE)
+
+
+def favorite_song_key(song) -> str:
+    """收藏去重键（与网页端 isFavorite() 一致：按歌曲 id 的字符串形式比对）。"""
+    return str((song or {}).get("id") or "").strip()
+
+
+def normalize_favorites(data) -> list:
+    """把收藏数据整理成去重后的歌曲列表，并保持原顺序。
+
+    归档/导出用的是网页端同款格式 ``{"<id>": {...}}``；也兼容歌曲数组，
+    这样网页端导出的收藏 JSON 可以直接导入本程序。
+    """
+    if isinstance(data, dict):
+        items = list(data.values())
+    elif isinstance(data, list):
+        items = data
+    else:
+        return []
+    songs, seen = [], set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        key = favorite_song_key(item)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        songs.append(dict(item))
+    return songs
+
+
+def load_favorites(path="") -> list:
+    """读取本地收藏；文件不存在或损坏时返回空列表（不影响启动）。"""
+    try:
+        with open(path or favorites_store_path(), encoding="utf-8") as fh:
+            return normalize_favorites(json.load(fh))
+    except Exception:
+        return []
+
+
+def save_favorites(songs, path="") -> bool:
+    """把收藏写回本地存档（``{id: song}`` JSON，与网页端导出的收藏文件一致）。"""
+    target = path or favorites_store_path()
+    payload = {favorite_song_key(s): s for s in (songs or []) if favorite_song_key(s)}
+    try:
+        parent = os.path.dirname(target)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(target, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
 class JusicGui:
     def __init__(self, root: tk.Tk, args):
         self.root = root
@@ -171,6 +237,18 @@ class JusicGui:
         self._picked_ids = set()      # 本会话自己点过歌的 id（服务端点赞仅认这些）
         self._last_like = None        # (歌曲id, 时间)：服务端拒绝时用来撤回 👍 标记
 
+        # 我的收藏（本地存档，对应网页端 localStorage 的 collectMusic）
+        self._favorites = load_favorites()
+        self._favorite_ids = {favorite_song_key(s) for s in self._favorites}
+        self._favorites_win = None    # 经典界面「我的收藏」窗口
+        self._fav_page = None         # 主题界面「我的收藏」标签页
+        self._fav_by_iid = {}
+        self._fav_count_var = None
+        self._fav_status_var = None
+        self._fav_playall_btn = None
+        self.fav_tree = None
+        self.fav_btn = None           # 播放栏 ♥ 按钮
+
         # 未显式指定 mpv 时，优先使用打进 exe 的内置 mpv
         mpv_path = args.mpv or bundled_mpv_path()
         self.client = RoomClient(host=args.host, volume=args.volume,
@@ -178,6 +256,8 @@ class JusicGui:
 
         self._build_ui()
         self._init_tray()
+        if self._favorites:
+            self._log(f"已载入 {len(self._favorites)} 首本地收藏（点「我的收藏…」查看）", "muted")
         root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ===================================================================== #
@@ -275,16 +355,21 @@ class JusicGui:
         ttk.Label(info, textvariable=self.online_var, foreground="#06a").grid(row=2, column=1, sticky="e", pady=(4, 0))
         act = ttk.Frame(info)
         act.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(6, 0))
-        act.columnconfigure(2, weight=1)
+        act.columnconfigure(3, weight=1)
         ttk.Button(act, text="切歌（投票）",
                    command=self._skip_vote).grid(row=0, column=0, sticky="w")
         ttk.Button(act, text="点歌…",
                    command=self._open_pick_dialog).grid(row=0, column=1, sticky="w", padx=(6, 0))
+        self.fav_btn = ttk.Button(act, text="♡ 收藏",
+                                  command=self._toggle_current_favorite)
+        self.fav_btn.grid(row=0, column=2, sticky="w", padx=(6, 0))
+        ttk.Button(act, text="我的收藏…",
+                   command=self._open_favorites_dialog).grid(row=0, column=3, sticky="w", padx=(6, 0))
         ttk.Button(act, text="分享房间…",
-                   command=self._share_room).grid(row=0, column=2, sticky="e")
+                   command=self._share_room).grid(row=0, column=4, sticky="e")
         ttk.Label(act, text="普通成员投票，票数达标自动切歌",
                   foreground="#888", font=(FONT, 8)).grid(
-            row=1, column=0, columnspan=3, sticky="w", pady=(2, 0))
+            row=1, column=0, columnspan=5, sticky="w", pady=(2, 0))
 
         vol_row = ttk.Frame(right)
         vol_row.grid(row=1, column=0, sticky="ew", pady=(6, 0))
@@ -329,21 +414,26 @@ class JusicGui:
         qf.grid(row=3, column=0, sticky="nsew", pady=(6, 0))
         qf.rowconfigure(0, weight=1)
         qf.columnconfigure(0, weight=1)
-        qcols = ("n", "d", "liked")
+        qcols = ("n", "d", "fav", "liked")
         self.queue_tree = ttk.Treeview(qf, columns=qcols, show="headings", height=6)
         self.queue_tree.heading("n", text="歌曲")
         self.queue_tree.heading("d", text="时长/点歌人")
+        self.queue_tree.heading("fav", text="收藏")
         self.queue_tree.heading("liked", text="点赞")
-        self.queue_tree.column("n", width=198, anchor="w")
-        self.queue_tree.column("d", width=148, anchor="w")
-        self.queue_tree.column("liked", width=54, anchor="center")
+        self.queue_tree.column("n", width=190, anchor="w")
+        self.queue_tree.column("d", width=142, anchor="w")
+        self.queue_tree.column("fav", width=46, anchor="center")
+        self.queue_tree.column("liked", width=48, anchor="center")
         qvs = ttk.Scrollbar(qf, orient="vertical", command=self.queue_tree.yview)
         self.queue_tree.configure(yscrollcommand=qvs.set)
         self.queue_tree.grid(row=0, column=0, sticky="nsew")
         qvs.grid(row=0, column=1, sticky="ns")
-        ttk.Button(qf, text="👍 点赞选中歌曲",
-                   command=self._like_selected_queue).grid(
-            row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        qbar = ttk.Frame(qf)
+        qbar.grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Button(qbar, text="👍 点赞选中歌曲",
+                   command=self._like_selected_queue).pack(side="left")
+        ttk.Button(qbar, text="♡ 收藏选中歌曲",
+                   command=self._favorite_selected_queue).pack(side="left", padx=(6, 0))
 
         # 日志
         lf = ttk.Labelframe(right, text="动态/日志", padding=4)
@@ -818,7 +908,7 @@ class JusicGui:
 
     # ---------------- 点歌队列渲染 / 点赞 ---------------- #
     def _render_queue(self):
-        """重绘点歌队列；「点赞」列显示本会话已点赞的歌曲（👍）。"""
+        """重绘点歌队列；「收藏」列 ♥ 表示已收藏，列「点赞」❤ 表示已点赞。"""
         pos = self.queue_tree.yview()[0]
         self.queue_tree.delete(*self.queue_tree.get_children())
         self._queue_by_iid.clear()
@@ -829,7 +919,9 @@ class JusicGui:
             sub = (f"{human_seconds(song.get('duration'))}　点："
                    f"{song.get('nickName') or song.get('picker') or '?'}")
             liked = "👍" if str(song.get("id")) in self._liked_ids else ""
-            self.queue_tree.insert("", "end", iid=iid, values=(txt[:44], sub[:36], liked))
+            fav = "♥" if self._is_favorite(song) else ""
+            self.queue_tree.insert("", "end", iid=iid,
+                                   values=(txt[:44], sub[:36], fav, liked))
         if self._queue_songs:
             try:
                 self.queue_tree.yview_moveto(pos)      # 重绘后保持滚动位置
@@ -892,6 +984,379 @@ class JusicGui:
             self._log("这首歌已不在队列中，请等待队列刷新", "warn")
             return
         self._like_song(song, "队列")
+
+    # ---------------- 我的收藏（网页端「我的收藏」同款） ---------------- #
+    def _is_favorite(self, song_or_id) -> bool:
+        """是否已收藏（按歌曲 id 比对，与网页端 isFavorite() 一致）。"""
+        if isinstance(song_or_id, dict):
+            key = favorite_song_key(song_or_id)
+        else:
+            key = str(song_or_id or "").strip()
+        return bool(key) and key in self._favorite_ids
+
+    def _persist_favorites(self):
+        """写回本地存档（%APPDATA%/JusicRoomPlayer/favorites.json）。"""
+        if not save_favorites(self._favorites):
+            self._log("收藏写入本地存档失败（文件可能被占用或没有写入权限）", "warn")
+
+    def _fav_note(self, text, tag=None):
+        """收藏相关提示：写入日志区，并同步到「我的收藏」界面状态栏（如已打开）。"""
+        self._log(text, tag)
+        var = getattr(self, "_fav_status_var", None)
+        if var is not None:
+            try:
+                var.set(text)
+            except Exception:
+                pass
+
+    def _sync_favorite_button(self):
+        """同步播放栏 ♥ 按钮（当前歌曲是否已收藏）。"""
+        btn = getattr(self, "fav_btn", None)
+        if btn is None:
+            return
+        try:
+            btn.configure(text=("♥ 已收藏" if self._is_favorite(self._current_music)
+                                else "♡ 收藏"))
+        except Exception:
+            pass
+
+    def _refresh_favorite_state(self):
+        """收藏变化后统一刷新：去重索引、播放栏 ♥、队列 ♥ 列、收藏列表。"""
+        self._favorite_ids = {favorite_song_key(s) for s in self._favorites}
+        self._sync_favorite_button()
+        self._render_queue()
+        self._render_favorites()
+
+    def _toggle_favorite(self, song=None, where="") -> bool:
+        """收藏 / 取消收藏一首歌（对应网页端播放栏 ♥ 与队列行 ♥）。
+
+        与网页端行为一致：已在收藏中就移除；否则插到列表最前（收藏时不保留歌词）。
+        收藏只写本机存档，不影响房间，也不受服务端限制。
+        """
+        song = self._current_music if song is None else song
+        key = favorite_song_key(song)
+        if not song or not key:
+            self._log("当前没有可收藏的歌曲", "warn")
+            return False
+        index = next((i for i, item in enumerate(self._favorites)
+                      if favorite_song_key(item) == key), -1)
+        name = str(song.get("name") or key)
+        artist = str(song.get("artist") or "")
+        if index >= 0:
+            self._favorites.pop(index)
+            added = False
+        else:
+            item = dict(song)
+            item["lyric"] = ""                  # 网页端收藏时同样不保留歌词
+            self._favorites.insert(0, item)     # 最新收藏排最前
+            added = True
+        self._persist_favorites()
+        self._refresh_favorite_state()
+        label = f"{name} - {artist}".strip(" -")
+        self._fav_note(f"{'已收藏' if added else '已取消收藏'}{where}：{label}",
+                       "good" if added else "muted")
+        return added
+
+    def _toggle_current_favorite(self):
+        """播放栏 ♥：收藏 / 取消收藏当前播放的歌曲。"""
+        if not self._current_music:
+            self._log("当前没有播放中的歌曲，无法收藏", "warn")
+            return
+        self._toggle_favorite(self._current_music, "当前播放")
+
+    def _favorite_selected_queue(self):
+        """收藏 / 取消收藏点歌队列中选中的歌曲（对应网页端队列行的 ♥）。"""
+        sel = self.queue_tree.selection()
+        if not sel:
+            self._log("请先在点歌队列中选择一首歌", "warn")
+            return
+        song = self._queue_by_iid.get(sel[0])
+        if not song:
+            self._log("这首歌已不在队列中，请等待队列刷新", "warn")
+            return
+        self._toggle_favorite(song, "（队列）")
+
+    def _selected_favorite(self):
+        """取「我的收藏」列表中选中的歌曲；未选中时给出提示并返回 None。"""
+        tree = getattr(self, "fav_tree", None)
+        if tree is None:
+            self._fav_note("请先打开「我的收藏」", "warn")
+            return None
+        try:
+            sel = tree.selection()
+        except Exception:
+            sel = ()
+        if not sel:
+            self._fav_note("请先在收藏列表中选择一首歌", "warn")
+            return None
+        song = self._fav_by_iid.get(sel[0])
+        if not song:
+            self._fav_note("这首收藏已不在列表中，请重新选择", "warn")
+            return None
+        return song
+
+    def _favorite_pick(self, song, quality="320k") -> bool:
+        """把收藏里的歌加入房间点歌队列（对应网页端收藏行的「播放」）。"""
+        key = favorite_song_key(song)
+        if not key:
+            self._fav_note("这首歌缺少歌曲 id，无法点歌", "warn")
+            return False
+        if not self.client.connected:
+            self._fav_note("尚未连接房间，无法点歌", "warn")
+            return False
+        name = str(song.get("name") or key)
+        artist = str(song.get("artist") or "")
+        label = "高清(FLAC)" if quality == "flac" else "标准(320k)"
+        if not self.client.pick_song(key, name, song.get("source") or "wy", quality):
+            self._fav_note("点歌失败：歌曲 id 无效", "warn")
+            return False
+        self._picked_ids.add(key)              # 记为本会话自己点的歌（点赞需要）
+        self._fav_note(f"点歌（{label}）：{name} - {artist}".strip(" -"), "good")
+        return True
+
+    def _favorite_pick_selected(self, quality="320k"):
+        """点歌选中的收藏（双击收藏项也可以）。"""
+        song = self._selected_favorite()
+        if song is not None:
+            self._favorite_pick(song, quality)
+
+    def _favorite_remove_selected(self):
+        """取消收藏选中的歌（对应网页端收藏行的「取消收藏」）。"""
+        song = self._selected_favorite()
+        if song is not None:
+            self._toggle_favorite(song, "（收藏列表）")
+
+    def _favorite_play_all(self):
+        """播放全部：把收藏依次加入房间点歌队列（对应网页端「播放全部」）。"""
+        if not self._favorites:
+            self._fav_note("收藏列表为空，没有可点播的歌曲", "warn")
+            return
+        if not self.client.connected:
+            self._fav_note("尚未连接房间，无法点歌", "warn")
+            return
+        sent = 0
+        for song in list(self._favorites):
+            if self._favorite_pick(song):
+                sent += 1
+        self._fav_note(f"已把 {sent}/{len(self._favorites)} 首收藏发送到点歌队列", "good")
+
+    def _favorite_clear(self):
+        """清空收藏（对应网页端收藏面板的「清空」）。"""
+        if not self._favorites:
+            self._fav_note("收藏列表已经是空的", "muted")
+            return
+        if not messagebox.askyesno(
+                "清空我的收藏",
+                f"确定要清空全部 {len(self._favorites)} 首收藏吗？\n"
+                "此操作不可撤销（可先「导出」备份）。",
+                parent=self._favorites_win or self.root):
+            return
+        self._favorites = []
+        self._persist_favorites()
+        self._refresh_favorite_state()
+        self._fav_note("收藏已清空", "muted")
+
+    def _favorite_export(self):
+        """导出收藏为 JSON（与网页端「导出」同格式，可互相导入）。"""
+        if not self._favorites:
+            self._fav_note("收藏列表为空，没有可导出的内容", "warn")
+            return
+        path = filedialog.asksaveasfilename(
+            parent=self._favorites_win or self.root, title="导出我的收藏",
+            initialfile=f"jusic-favorites-{int(time.time())}.json",
+            defaultextension=".json",
+            filetypes=[("JSON 收藏文件", "*.json"), ("所有文件", "*.*")])
+        if not path:
+            return
+        if save_favorites(self._favorites, path):
+            self._fav_note(f"已导出 {len(self._favorites)} 首收藏："
+                           f"{os.path.basename(path)}", "good")
+        else:
+            self._fav_note("导出失败：无法写入该文件", "warn")
+
+    def _favorite_import(self):
+        """从 JSON 导入收藏（兼容网页端「导出」的文件：对象或数组均可）。"""
+        path = filedialog.askopenfilename(
+            parent=self._favorites_win or self.root, title="导入我的收藏（JSON）",
+            filetypes=[("JSON 收藏文件", "*.json"), ("所有文件", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as fh:
+                incoming = normalize_favorites(json.load(fh))
+        except Exception as exc:
+            self._fav_note(f"收藏文件读取失败：{exc}", "warn")
+            return
+        if not incoming:
+            self._fav_note("收藏文件里没有可识别的歌曲，请确认是网页端导出的收藏 JSON", "warn")
+            return
+        merged = {favorite_song_key(s): s for s in self._favorites}
+        added = 0
+        for song in incoming:
+            key = favorite_song_key(song)
+            if not key:
+                continue
+            if key not in merged:
+                added += 1
+            merged[key] = song
+        self._favorites = list(merged.values())
+        self._persist_favorites()
+        self._refresh_favorite_state()
+        self._fav_note(f"已导入 {len(incoming)} 首收藏（新增 {added} 首）", "good")
+
+    def _render_favorites(self):
+        """重绘「我的收藏」列表（经典界面在窗口里，主题界面在标签页里）。"""
+        count_var = getattr(self, "_fav_count_var", None)
+        if count_var is not None:
+            try:
+                count_var.set(f"共 {len(self._favorites)} 首收藏")
+            except Exception:
+                pass
+        play_all = getattr(self, "_fav_playall_btn", None)
+        if play_all is not None:
+            try:
+                play_all.configure(state=("normal" if self._favorites else "disabled"))
+            except Exception:
+                pass
+        win = getattr(self, "_favorites_win", None)
+        if win is not None:
+            try:
+                if win.winfo_exists():
+                    win.title(f"我的收藏（{len(self._favorites)} 首）")
+            except Exception:
+                pass
+        tree = getattr(self, "fav_tree", None)
+        if tree is None:
+            return
+        try:
+            if not tree.winfo_exists():
+                return
+        except Exception:
+            return
+        self._fav_by_iid = {}
+        try:
+            tree.delete(*tree.get_children())
+        except Exception:
+            return
+        for i, song in enumerate(self._favorites):
+            iid = str(i)
+            self._fav_by_iid[iid] = song
+            artist = str(song.get("artist") or "未知歌手")
+            album = song_album(song)
+            meta = f"{artist} · {album}" if album else artist
+            try:
+                tree.insert("", "end", iid=iid, values=(
+                    str(song.get("name") or f"歌曲 {song.get('id')}")[:34],
+                    meta[:44],
+                    str(song.get("source") or "wy"),
+                    human_seconds(song.get("duration")),
+                ))
+            except Exception:
+                pass
+
+    def _close_favorites_dialog(self):
+        """关闭经典界面的「我的收藏」窗口，并清掉对已销毁控件的引用。"""
+        win, self._favorites_win = getattr(self, "_favorites_win", None), None
+        self.fav_tree = None
+        self._fav_by_iid = {}
+        self._fav_count_var = None
+        self._fav_status_var = None
+        self._fav_playall_btn = None
+        if win is not None:
+            try:
+                win.destroy()
+            except Exception:
+                pass
+
+    def _open_favorites_dialog(self):
+        """经典界面：打开「我的收藏」窗口（主题界面覆写为切到收藏标签页）。"""
+        win = getattr(self, "_favorites_win", None)
+        if win is not None and win.winfo_exists():
+            win.lift()
+            win.focus_force()
+            return
+
+        win = tk.Toplevel(self.root)
+        self._favorites_win = win
+        win.title(f"我的收藏（{len(self._favorites)} 首）")
+        win.transient(self.root)
+        win.minsize(620, 420)
+        win.geometry("720x500")
+        try:
+            self.root.update_idletasks()
+            win.geometry(f"+{self.root.winfo_rootx() + 120}+{self.root.winfo_rooty() + 70}")
+        except Exception:
+            pass
+        win.protocol("WM_DELETE_WINDOW", self._close_favorites_dialog)
+        win.bind("<Escape>", lambda e: self._close_favorites_dialog())
+
+        body = ttk.Frame(win, padding=8)
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(3, weight=1)
+
+        ttk.Label(body, text="我的收藏", font=(FONT, 12, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(body, text="收藏只保存在本机（与网页端「我的收藏」同款）；"
+                             "导出的 JSON 可与网页端互相导入。",
+                  foreground="#666", justify="left").grid(row=1, column=0, sticky="w", pady=(2, 6))
+
+        toolbar = ttk.Frame(body)
+        toolbar.grid(row=2, column=0, sticky="ew", pady=(0, 6))
+        toolbar.columnconfigure(4, weight=1)
+        self._fav_playall_btn = ttk.Button(toolbar, text="▶ 播放全部",
+                                           command=self._favorite_play_all)
+        self._fav_playall_btn.grid(row=0, column=0, sticky="w")
+        ttk.Button(toolbar, text="导出", width=6,
+                   command=self._favorite_export).grid(row=0, column=1, padx=(6, 0))
+        ttk.Button(toolbar, text="导入", width=6,
+                   command=self._favorite_import).grid(row=0, column=2, padx=(4, 0))
+        ttk.Button(toolbar, text="清空", width=6,
+                   command=self._favorite_clear).grid(row=0, column=3, padx=(4, 0))
+        self._fav_count_var = tk.StringVar(value=f"共 {len(self._favorites)} 首收藏")
+        ttk.Label(toolbar, textvariable=self._fav_count_var, foreground="#555").grid(
+            row=0, column=4, sticky="e")
+
+        tree_box = ttk.Frame(body)
+        tree_box.grid(row=3, column=0, sticky="nsew")
+        tree_box.rowconfigure(0, weight=1)
+        tree_box.columnconfigure(0, weight=1)
+        cols = ("n", "a", "s", "d")
+        self.fav_tree = ttk.Treeview(tree_box, columns=cols, show="headings", height=12)
+        self.fav_tree.heading("n", text="歌曲")
+        self.fav_tree.heading("a", text="歌手 · 专辑")
+        self.fav_tree.heading("s", text="音源")
+        self.fav_tree.heading("d", text="时长")
+        self.fav_tree.column("n", width=240, anchor="w")
+        self.fav_tree.column("a", width=270, anchor="w")
+        self.fav_tree.column("s", width=56, anchor="center")
+        self.fav_tree.column("d", width=64, anchor="center")
+        vs = ttk.Scrollbar(tree_box, orient="vertical", command=self.fav_tree.yview)
+        self.fav_tree.configure(yscrollcommand=vs.set)
+        self.fav_tree.grid(row=0, column=0, sticky="nsew")
+        vs.grid(row=0, column=1, sticky="ns")
+        self.fav_tree.bind("<Double-1>", lambda e: self._favorite_pick_selected())
+        self.fav_tree.bind("<Return>", lambda e: self._favorite_pick_selected())
+
+        btns = ttk.Frame(body)
+        btns.grid(row=4, column=0, sticky="ew", pady=(6, 0))
+        btns.columnconfigure(3, weight=1)
+        ttk.Button(btns, text="点歌 · 标准",
+                   command=lambda: self._favorite_pick_selected("320k")).grid(
+            row=0, column=0, sticky="w")
+        ttk.Button(btns, text="点歌 · 高清",
+                   command=lambda: self._favorite_pick_selected("flac")).grid(
+            row=0, column=1, padx=(6, 0))
+        ttk.Button(btns, text="取消收藏",
+                   command=self._favorite_remove_selected).grid(row=0, column=2, padx=(6, 0))
+        ttk.Button(btns, text="关闭", width=8,
+                   command=self._close_favorites_dialog).grid(row=0, column=4, sticky="e")
+
+        self._fav_status_var = tk.StringVar(
+            value="选中一首后点「点歌 · 标准/高清」，或双击收藏项直接点歌")
+        ttk.Label(body, textvariable=self._fav_status_var, foreground="#888",
+                  font=(FONT, 8), wraplength=660, justify="left").grid(
+            row=5, column=0, sticky="w", pady=(6, 0))
+        self._render_favorites()
 
     # ---------------- 分享房间（链接 / 二维码 / 小程序码） ---------------- #
     def _share_room(self):
@@ -1485,6 +1950,7 @@ class JusicGui:
             self.track_var.set(f"{title} - {artist}")
             self.sub_var.set(f"时长 {dur}　来源 {m.get('source') or m.get('platform') or '—'}")
             self._log(f"[♪] {title} - {artist} {dur}", "music")
+            self._sync_favorite_button()      # 播放栏 ♥ 跟随当前歌曲
             # 歌词：LRC 解析 + 按本地起播时间同步滚动
             self._begin_lyrics(m.get("lyric") or "", m.get("duration"))
         elif event == "search":

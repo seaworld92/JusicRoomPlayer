@@ -16,7 +16,10 @@ Jusic 房间播放器 · 主题界面版（ttkbootstrap）
   界面里可用「风格下拉框 + 深色开关 + 全部主题菜单」任意切换，
   也可用 Ctrl+T 一键明暗对调；主题会记住，下次启动自动恢复；
 * **深色主题适配**：歌词/日志文本框、次要文字、以及父类对话框里硬编码的
-  浅色文字，都会随主题重新着色，暗色下同样清晰。
+  浅色文字，都会随主题重新着色，暗色下同样清晰；
+* **我的收藏**：与网页端同款（只存本机，JSON 可与网页端互相导入），
+  在「♥ 我的收藏」标签页里管理；收藏逻辑同样继承自 ``jusic_gui.JusicGui``，
+  本文件只提供标签页界面。
 
 运行
 ----
@@ -324,6 +327,7 @@ class BootstrapGui(JusicGui):
         nb.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
         nb.add(self._build_lyric_page(nb), text="  ♪ 歌词  ")
         nb.add(self._build_queue_page(nb), text="  🎵 点歌队列  ")
+        nb.add(self._build_favorites_page(nb), text="  ♥ 我的收藏  ")
         nb.add(self._build_log_page(nb), text="  📋 动态日志  ")
         self._notebook = nb
         return right
@@ -353,15 +357,21 @@ class BootstrapGui(JusicGui):
 
         act = ttb.Frame(info)
         act.grid(row=3, column=0, sticky="ew", pady=(10, 0))
-        act.columnconfigure(2, weight=1)
+        act.columnconfigure(3, weight=1)
         ttb.Button(act, text="切歌（投票）", bootstyle="warning",
                    command=self._skip_vote).grid(row=0, column=0, sticky="w")
         ttb.Button(act, text="点歌…", bootstyle="primary",
                    command=self._open_pick_dialog).grid(row=0, column=1, sticky="w", padx=(6, 0))
+        self.fav_btn = ttb.Button(act, text="♡ 收藏", bootstyle="danger-outline",
+                                  command=self._toggle_current_favorite)
+        self.fav_btn.grid(row=0, column=2, sticky="w", padx=(6, 0))
+        ttb.Button(act, text="我的收藏…", bootstyle="danger-outline",
+                   command=self._open_favorites_dialog).grid(
+            row=0, column=3, sticky="w", padx=(6, 0))
         ttb.Button(act, text="分享房间…", bootstyle="info-outline",
-                   command=self._share_room).grid(row=0, column=2, sticky="e")
+                   command=self._share_room).grid(row=0, column=4, sticky="e")
         self._muted(act, text="普通成员投票，票数达标自动切歌", font=(FONT, 8)).grid(
-            row=1, column=0, columnspan=3, sticky="w", pady=(2, 0))
+            row=1, column=0, columnspan=5, sticky="w", pady=(2, 0))
 
         vol_row = ttb.Frame(info)
         vol_row.grid(row=4, column=0, sticky="ew", pady=(10, 0))
@@ -407,12 +417,13 @@ class BootstrapGui(JusicGui):
         page = ttb.Frame(parent, padding=8)
         page.rowconfigure(0, weight=1)
         page.columnconfigure(0, weight=1)
-        qcols = ("n", "d", "liked")
+        qcols = ("n", "d", "fav", "liked")
         self.queue_tree = ttb.Treeview(page, columns=qcols, show="headings",
                                        height=9, bootstyle="info")
-        for key, text, width, anchor in (("n", "歌曲", 230, "w"),
-                                         ("d", "时长/点歌人", 170, "w"),
-                                         ("liked", "点赞", 60, "center")):
+        for key, text, width, anchor in (("n", "歌曲", 220, "w"),
+                                         ("d", "时长/点歌人", 165, "w"),
+                                         ("fav", "收藏", 50, "center"),
+                                         ("liked", "点赞", 50, "center")):
             self.queue_tree.heading(key, text=text)
             self.queue_tree.column(key, width=width, anchor=anchor)
         qvs = ttb.Scrollbar(page, orient="vertical", command=self.queue_tree.yview)
@@ -423,8 +434,67 @@ class BootstrapGui(JusicGui):
         bar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         ttb.Button(bar, text="👍 点赞选中歌曲", bootstyle="success-outline",
                    command=self._like_selected_queue).pack(side="left")
+        ttb.Button(bar, text="♡ 收藏选中歌曲", bootstyle="danger-outline",
+                   command=self._favorite_selected_queue).pack(side="left", padx=(6, 0))
         self._muted(bar, text="服务端只接受自己点的歌点赞；房间开启“点赞排序”时顺序会变",
                     font=(FONT, 8)).pack(side="left", padx=(8, 0))
+        return page
+
+    def _build_favorites_page(self, parent):
+        """「我的收藏」标签页（与网页端收藏面板同款：播放全部/导出/导入/清空）。"""
+        page = ttb.Frame(parent, padding=8)
+        page.columnconfigure(0, weight=1)
+        page.rowconfigure(1, weight=1)
+
+        bar = ttb.Frame(page)
+        bar.grid(row=0, column=0, columnspan=2, sticky="ew")
+        bar.columnconfigure(5, weight=1)
+        self._fav_playall_btn = ttb.Button(bar, text="▶ 播放全部", bootstyle="success",
+                                           command=self._favorite_play_all)
+        self._fav_playall_btn.grid(row=0, column=0, sticky="w")
+        ttb.Button(bar, text="导出", width=6, bootstyle="secondary-outline",
+                   command=self._favorite_export).grid(row=0, column=1, padx=(6, 0))
+        ttb.Button(bar, text="导入", width=6, bootstyle="secondary-outline",
+                   command=self._favorite_import).grid(row=0, column=2, padx=(4, 0))
+        ttb.Button(bar, text="清空", width=6, bootstyle="danger-outline",
+                   command=self._favorite_clear).grid(row=0, column=3, padx=(4, 0))
+        self._fav_count_var = tk.StringVar(value=f"共 {len(self._favorites)} 首收藏")
+        self._muted(bar, textvariable=self._fav_count_var, font=(FONT, 9)).grid(
+            row=0, column=5, sticky="e")
+
+        cols = ("n", "a", "s", "d")
+        self.fav_tree = ttb.Treeview(page, columns=cols, show="headings",
+                                     height=10, bootstyle="danger")
+        for key, text, width, anchor in (("n", "歌曲", 230, "w"),
+                                         ("a", "歌手 · 专辑", 260, "w"),
+                                         ("s", "音源", 56, "center"),
+                                         ("d", "时长", 64, "center")):
+            self.fav_tree.heading(key, text=text)
+            self.fav_tree.column(key, width=width, anchor=anchor)
+        vs = ttb.Scrollbar(page, orient="vertical", command=self.fav_tree.yview)
+        self.fav_tree.configure(yscrollcommand=vs.set)
+        self.fav_tree.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+        vs.grid(row=1, column=1, sticky="ns", pady=(8, 0))
+        self.fav_tree.bind("<Double-1>", lambda e: self._favorite_pick_selected())
+        self.fav_tree.bind("<Return>", lambda e: self._favorite_pick_selected())
+
+        row = ttb.Frame(page)
+        row.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ttb.Button(row, text="点歌 · 标准", bootstyle="primary",
+                   command=lambda: self._favorite_pick_selected("320k")).pack(side="left")
+        ttb.Button(row, text="点歌 · 高清", bootstyle="info",
+                   command=lambda: self._favorite_pick_selected("flac")).pack(
+            side="left", padx=(6, 0))
+        ttb.Button(row, text="取消收藏", bootstyle="danger-outline",
+                   command=self._favorite_remove_selected).pack(side="left", padx=(6, 0))
+
+        self._fav_status_var = tk.StringVar(
+            value="收藏只保存在本机（与网页端「我的收藏」同款），导出的 JSON 可互相导入")
+        self._muted(page, textvariable=self._fav_status_var, font=(FONT, 8)).grid(
+            row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+        self._fav_page = page
+        self._render_favorites()
         return page
 
     def _build_log_page(self, parent):
@@ -712,6 +782,25 @@ class BootstrapGui(JusicGui):
                 self._rooms_hint_var.set(f"筛选出 {shown} / {len(rooms)} 个房间")
             else:
                 self._rooms_hint_var.set(f"共 {shown} 个房间 · 双击进入")
+        except Exception:
+            pass
+
+    def _sync_favorite_button(self):
+        """播放栏 ♥：文字由父类同步，这里再按收藏状态换主题配色。"""
+        super()._sync_favorite_button()
+        btn = getattr(self, "fav_btn", None)
+        if btn is None:
+            return
+        try:
+            btn.configure(bootstyle=("danger" if self._is_favorite(self._current_music)
+                                     else "danger-outline"))
+        except Exception:
+            pass
+
+    def _open_favorites_dialog(self):
+        """主题界面不另开窗口：直接切到「我的收藏」标签页。"""
+        try:
+            self._notebook.select(self._fav_page)
         except Exception:
             pass
 

@@ -4,12 +4,14 @@
 - 路径 `d:\BaiduSyncdisk\编程\本地音乐播放器`；「一起听歌吧」Jusic 房间的**低内存** Python 播放器（工作区名「本地音乐播放器」）。播放 https://happy.alang.run/modern-ui/（后端 https://tx.alang.run/api，源自 JumpAlang/Jusic-Serve-Houses），支持房间列表与切换。
 - **许可证 GPL-3.0**（2026-09-03 用户确认）：LICENSE + THIRD_PARTY_NOTICES；源码头 `SPDX-License-Identifier: GPL-3.0-only` + `Copyright (C) 2026 The JusicRoomPlayer Authors`。上游 Jusic-Serve-Houses 亦为 GPL-3.0（README 曾误标 MIT，已修正）；mpv=LGPL2.1+/ISC，websockets=BSD-3，ttkbootstrap=MIT。
 - 交流语言：简体中文。平台现状：**仅 Windows 完整可用**。
+- **Git 约定（2026-10-03 用户明确）：本项目只提交、不推送。** AI 完成工作后 `git add -A` + `git commit`（中文提交信息，风格如「新增…」「版本 x.y.z」）即可，**不要执行 `git push` / 打 tag 或推送 tag**，推送由用户自己决定；发布 Release 也要等用户明确要求再做。
 
 ## 架构与产物
 - `jusic_core.py` 共享核心：RoomClient（后台 asyncio 线程 + `listener(event,data)` 回调；**`_amain` 必须设 `self._loop = get_running_loop()`**，否则线程安全请求被吞）、MpvEngine、REST/WSS 协议与帧解析。
 - 三个前端：`jusic_room_player.py`（CLI）、`jusic_gui.py`（ttk GUI）、`jusic_gui_bootstrap.py`（ttkbootstrap 多主题版，`class BootstrapGui(JusicGui)` 只覆写 UI 层，业务逻辑单一来源）。两个 `.pyw` 均为**薄启动器**（只 `from xxx import main`），避免副本漂移。GUI 线程桥 = queue + `root.after(_poll)`。
 - 支撑模块：`jusic_tray.py`（Win32 托盘，纯 ctypes；非 Windows 下 `available()=False` → 退化为普通最小化）、`jusic_qr.py`（纯 Python 二维码，零依赖）、`tools/mem_bench.py`（Windows 内存基准，唯一入库测试工具）。
-- 功能：房间列表/搜索/切换、密码房、音量即时生效、歌词 LRC 高亮、切歌投票、点歌（5 音源）、点赞、下载（音频 + .lrc）、房间分享（链接/二维码/小程序码）、聊天、托盘。
+- 功能：房间列表/搜索/切换、密码房、音量即时生效、歌词 LRC 高亮、切歌投票、点歌（5 音源）、点赞、**我的收藏**、下载（音频 + .lrc）、房间分享（链接/二维码/小程序码）、聊天、托盘。
+- **我的收藏（2026-10-03 新增，模仿官网）**：纯本地功能，**无任何服务端接口**。官网把收藏放在浏览器 `localStorage` 的 `collectMusic`（`{歌曲id: 歌曲}`，最新在最前，收藏时 `lyric` 置空）；本程序存在 `%APPDATA%\JusicRoomPlayer\favorites.json`，**格式与官网导出完全一致**（`{id: song}`、indent 2），可两端互相导入/导出。逻辑全在 `jusic_gui.JusicGui`（模块级 `load_favorites/save_favorites/normalize_favorites/favorite_song_key/favorites_store_path`），主题版只加「♥ 我的收藏」标签页并覆写 `_open_favorites_dialog`（切标签页）与 `_sync_favorite_button`（bootstyle）。两端的 `queue_tree` 列已统一为 `("n","d","fav","liked")`。
 - 打包（2026-10-02 起默认双前端）：`build_exe.bat`（单文件 exe）/ `build_exe_dir.bat`（onedir + ZIP），版本取自 `VERSION`；**默认同时打经典 `jusic_gui.py` 与主题 `jusic_gui_bootstrap.py`**，开关 `-n` 跳依赖 / `-k` 保留缓存 / `-d` 深度清缓存 / `-c` 只经典 / `-t` 只主题 / `-a` 两个 / `-h` 帮助。产物：`JusicRoomPlayer <ver>.exe`、`JusicRoomPlayerTheme <ver>.exe`、`JusicRoomPlayerPortable_<ver>.zip`、`JusicRoomPlayerThemePortable_<ver>.zip`。约定 `--distpath dist --workpath build --specpath build`，打包后清 `build\` 与 `__pycache__`，不传 `--clean` 以复用分析缓存；**`--exclude-module PIL` 只能给经典版**（ttkbootstrap 连带依赖 Pillow，主题版排除 PIL 会运行时崩）；`make_zip.py` 可传第一个参数=文件夹名（默认经典名，兼容旧调用）。两个 bat 用 **CRLF 行尾**（LF + `chcp 65001` 曾出现间歇性 `cannot find the batch label`）。`publish_release.py` 发布 Release 到 GitHub/Gitee（纯 urllib，`GH_TOKEN`/`GITEE_TOKEN`，幂等复用同名附件，`--dry-run` 免凭证），`artifacts()` 现已列出**全部 4 个产物**（经典/主题 × 单文件/便携，缺任一个即报错退出）。`.gitignore` 排除 `build/ dist/ *.spec`，但 **`.codebuddy/memory/` 有意跟踪**。
 - 文档：README.md（中文，含内存基准章节与三前端对比表）+ `README_EN.md`（英文，供 GitHub/Gitee 发布用）。
 
