@@ -25,6 +25,8 @@ Jusic 房间播放器 · 图形界面版 (ttk/tkinter)
       日志区、底部状态栏与点歌面板状态行都会显示（官网同款提示，非 20000 码的通知也不会再被丢掉）
     * 「♡ 收藏」把当前歌曲加入「我的收藏」；「我的收藏…」窗口可查看/点歌/播放全部/
       导出/导入/清空（与网页端「我的收藏」同款：只存本机，JSON 可与网页端互相导入）
+    * 「我的收藏」列表可排序：点首行表头「歌曲 / 歌手 · 专辑 / 音源 / 时长」即按该列
+      升序排列，再点一次同一表头改为降序（不影响收藏存档本身的顺序）
     * 点「在线人员…」可查询当前房间的在线成员（昵称/身份/会话 ID/加入时间，本人带 ★ 标记）
     * 点「分享房间…」可复制/打开直达链接，并生成二维码（手机扫码进房）
     * 最小化窗口时自动隐藏到系统托盘（后台继续播放）；双击托盘图标恢复窗口，
@@ -213,6 +215,9 @@ def save_favorites(songs, path="") -> bool:
 
 
 class JusicGui:
+    # 「我的收藏」列表列定义（列 id, 表头文字）：点表头即可按该列排序
+    FAV_COLUMNS = (("n", "歌曲"), ("a", "歌手 · 专辑"), ("s", "音源"), ("d", "时长"))
+
     def __init__(self, root: tk.Tk, args):
         self.root = root
         self.args = args
@@ -252,6 +257,7 @@ class JusicGui:
         self._favorites_win = None    # 经典界面「我的收藏」窗口
         self._fav_page = None         # 主题界面「我的收藏」标签页
         self._fav_by_iid = {}
+        self._fav_sort = ("", False)  # 收藏列表排序（列 id, 是否降序）；空列=按收藏顺序
         self._fav_count_var = None
         self._fav_status_var = None
         self._fav_playall_btn = None
@@ -1298,6 +1304,70 @@ class JusicGui:
         self._refresh_favorite_state()
         self._fav_note(f"已导入 {len(incoming)} 首收藏（新增 {added} 首）", "good")
 
+    # ---------------- 收藏列表排序（点表头即排序） ---------------- #
+    @staticmethod
+    def _favorite_sort_value(column, song):
+        """取某列用于排序的键：时长按毫秒数值，其余按不区分大小写的文本。"""
+        song = song or {}
+        if column == "n":
+            return str(song.get("name") or "").lower()
+        if column == "s":
+            return str(song.get("source") or "").lower()
+        if column == "d":
+            try:
+                return int(float(song.get("duration") or 0))
+            except (TypeError, ValueError):
+                return 0
+        return (str(song.get("artist") or "").lower(),
+                str(song_album(song) or "").lower())
+
+    def _favorite_rows(self):
+        """按当前排序设置返回收藏列表（不改动本机收藏存档里的顺序）。
+
+        排序只影响列表显示：导出、播放全部与后续新增收藏的顺序仍以存档为准。
+        """
+        rows = list(self._favorites)
+        column, reverse = getattr(self, "_fav_sort", ("", False))
+        if column:
+            try:
+                rows.sort(key=lambda s: self._favorite_sort_value(column, s),
+                          reverse=bool(reverse))
+            except Exception:
+                pass
+        return rows
+
+    def _apply_fav_headings(self):
+        """刷新「我的收藏」表头：当前排序列带 ▲/▼ 标记，并绑定点击即排序。"""
+        tree = getattr(self, "fav_tree", None)
+        if tree is None:
+            return
+        column, reverse = getattr(self, "_fav_sort", ("", False))
+        for col, text in self.FAV_COLUMNS:
+            mark = (" ▼" if reverse else " ▲") if col == column else ""
+            try:
+                tree.heading(col, text=text + mark,
+                             command=lambda c=col: self._favorite_sort_by(c))
+            except Exception:
+                pass
+
+    def _favorite_sort_by(self, column):
+        """点表头排序：首点升序，再点同一列改降序（不影响其它界面）。"""
+        titles = dict(self.FAV_COLUMNS)
+        if column not in titles:
+            return
+        current, reverse = getattr(self, "_fav_sort", ("", False))
+        reverse = (not reverse) if current == column else False
+        self._fav_sort = (column, reverse)
+        self._apply_fav_headings()
+        self._render_favorites()
+        var = getattr(self, "_fav_status_var", None)
+        if var is not None:
+            try:
+                var.set(f"已按「{titles[column]}」{'降序' if reverse else '升序'}排列"
+                        "（再点同一表头可反向；存档顺序不变）")
+            except Exception:
+                pass
+
     def _render_favorites(self):
         """重绘「我的收藏」列表（经典界面在窗口里，主题界面在标签页里）。"""
         count_var = getattr(self, "_fav_count_var", None)
@@ -1332,7 +1402,7 @@ class JusicGui:
             tree.delete(*tree.get_children())
         except Exception:
             return
-        for i, song in enumerate(self._favorites):
+        for i, song in enumerate(self._favorite_rows()):
             iid = str(i)
             self._fav_by_iid[iid] = song
             artist = str(song.get("artist") or "未知歌手")
@@ -1416,14 +1486,11 @@ class JusicGui:
         tree_box.columnconfigure(0, weight=1)
         cols = ("n", "a", "s", "d")
         self.fav_tree = ttk.Treeview(tree_box, columns=cols, show="headings", height=12)
-        self.fav_tree.heading("n", text="歌曲")
-        self.fav_tree.heading("a", text="歌手 · 专辑")
-        self.fav_tree.heading("s", text="音源")
-        self.fav_tree.heading("d", text="时长")
         self.fav_tree.column("n", width=240, anchor="w")
         self.fav_tree.column("a", width=270, anchor="w")
         self.fav_tree.column("s", width=56, anchor="center")
         self.fav_tree.column("d", width=64, anchor="center")
+        self._apply_fav_headings()      # 表头文字 + 点击排序（当前排序列带 ▲/▼）
         vs = ttk.Scrollbar(tree_box, orient="vertical", command=self.fav_tree.yview)
         self.fav_tree.configure(yscrollcommand=vs.set)
         self.fav_tree.grid(row=0, column=0, sticky="nsew")

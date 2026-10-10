@@ -19,7 +19,8 @@ Jusic 房间播放器 · 主题界面版（ttkbootstrap）
   浅色文字，都会随主题重新着色，暗色下同样清晰；
 * **我的收藏**：与网页端同款（只存本机，JSON 可与网页端互相导入），
   在「♥ 我的收藏」标签页里管理；收藏逻辑同样继承自 ``jusic_gui.JusicGui``，
-  本文件只提供标签页界面；
+  本文件只提供标签页界面。列表可按「歌曲 / 歌手 · 专辑 / 音源 / 时长」排序：
+  点首行对应表头即升序，再点同一表头改为降序；
 * **在线人员**：「在线人员…」按钮或「👥 在线人员」标签页可查询房间在线成员
   （昵称 / 身份 / 会话 ID / 加入时间，本人带 ★ 标记），切到该标签页会自动刷新一次。
 
@@ -489,8 +490,8 @@ class BootstrapGui(JusicGui):
                                          ("a", "歌手 · 专辑", 260, "w"),
                                          ("s", "音源", 56, "center"),
                                          ("d", "时长", 64, "center")):
-            self.fav_tree.heading(key, text=text)
             self.fav_tree.column(key, width=width, anchor=anchor)
+        self._apply_fav_headings()      # 表头文字 + 点击排序（当前排序列带 ▲/▼）
         vs = ttb.Scrollbar(page, orient="vertical", command=self.fav_tree.yview)
         self.fav_tree.configure(yscrollcommand=vs.set)
         self.fav_tree.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
